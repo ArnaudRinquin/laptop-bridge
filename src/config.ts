@@ -9,7 +9,8 @@ export interface Config {
   taskDisplayMode: "timeline" | "plan";
   staleStreamMinutes: number;
   /**
-   * Shell command spawned per mention (via /bin/zsh -lc). Receives env:
+   * Shell command spawned per mention (via /bin/zsh -ilc — interactive, so
+   * .zshrc PATH managers like fnm/nvm/mise are loaded). Receives env:
    * SLACK_THREAD_TS, SLACK_CHANNEL, SLACK_PROMPT, SLACK_EVENT_TS, SLACK_MCP_URL.
    * If null, runs a built-in smoke demo (stream "hi" + a task card, then stop).
    */
@@ -19,6 +20,10 @@ export interface Config {
   allowedUserIds: string[];
   /** tmux binary (absolute — the SwiftBar env has a minimal PATH). */
   tmuxBin: string;
+  /** herdr binary (absolute — same reason). */
+  herdrBin: string;
+  /** herdr control socket. The CLI derives it from $HOME, which the bridge can't count on. */
+  herdrSocket: string;
 }
 
 export const CONFIG_PATH = join(homedir(), ".config", "slack-trigger", "config.json");
@@ -45,5 +50,7 @@ export function loadConfig(): Config {
       ? j.allowedUserIds.filter((x: unknown): x is string => typeof x === "string")
       : [],
     tmuxBin: j.tmuxBin ?? "/opt/homebrew/bin/tmux",
+    herdrBin: j.herdrBin ?? "/opt/homebrew/bin/herdr",
+    herdrSocket: j.herdrSocket ?? join(homedir(), ".config", "herdr", "herdr.sock"),
   };
 }

@@ -1,4 +1,5 @@
 import { App, LogLevel, type Logger } from "@slack/bolt";
+import type { WebClient } from "@slack/web-api";
 import { spawn } from "node:child_process";
 import type { Config } from "./config";
 import type { Registry } from "./registry";
@@ -77,7 +78,7 @@ export function createSlackApp(config: Config, registry: Registry, ops: StreamOp
     const job = jobs.get(threadTs);
     if (job) {
       try {
-        const pane = findPane(await listPanes(config.tmuxBin), job);
+        const pane = findPane(await listPanes(config), job);
         if (pane) {
           if (!registry.has(threadTs)) {
             await ops.start({
@@ -89,13 +90,13 @@ export function createSlackApp(config: Config, registry: Registry, ops: StreamOp
               bootTitle: "Reconnecting to session…",
             });
           }
-          await injectText(config.tmuxBin, pane.id, `[slack follow-up threadTs:${threadTs}] ${prompt}`);
+          await injectText(config, pane, `[slack follow-up threadTs:${threadTs}] ${prompt}`);
           await ops.thinkingStep(threadTs, {
             id: `followup-${event.ts}`,
             title: "📨 Follow-up sent to the session",
             status: "complete",
           });
-          log(`follow-up: routed to pane ${pane.id} (${job.cwd}) for thread ${threadTs}`);
+          log(`follow-up: routed to ${pane.mux} pane ${pane.id} (${job.cwd}) for thread ${threadTs}`);
           return;
         }
         log(`follow-up: no pane found for ${threadTs} (cwd=${job.cwd}), falling back`);
@@ -137,7 +138,7 @@ export function createSlackApp(config: Config, registry: Registry, ops: StreamOp
     }
 
     if (config.jobCommand) {
-      spawnJob(config, { threadTs, channel: event.channel, prompt, eventTs: event.ts });
+      spawnJob(config, client, { threadTs, channel: event.channel, prompt, eventTs: event.ts });
     } else {
       void smokeDemo(ops, threadTs); // build-order step 1: prove the stream renders
     }
@@ -148,12 +149,21 @@ export function createSlackApp(config: Config, registry: Registry, ops: StreamOp
 
 function spawnJob(
   config: Config,
+  client: WebClient,
   job: { threadTs: string; channel: string; prompt: string; eventTs: string },
 ) {
-  const child = spawn("/bin/zsh", ["-lc", config.jobCommand!], {
+  // -i as well as -l: PATH managers that hook the shell (fnm, nvm, mise) load
+  // from .zshrc, which a login shell alone does not source — pnpm et al. are
+  // then missing and the worktree's pre-start hooks die with exit 127. The tmux
+  // design got this for free by typing into an interactive shell. stdin is
+  // "ignore", so an interactive prompt reads EOF instead of hanging.
+  const child = spawn("/bin/zsh", ["-ilc", config.jobCommand!], {
     cwd: config.jobCwd,
     detached: true,
-    stdio: "ignore",
+    // Piped, not ignored: the launcher used to fail visibly (a tmux window left
+    // open on the error) and now exits silently instead — so its output is the
+    // only evidence a spawn went wrong.
+    stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
       SLACK_THREAD_TS: job.threadTs,
@@ -163,7 +173,34 @@ function spawnJob(
       SLACK_MCP_URL: `http://127.0.0.1:${config.port}/mcp`,
     },
   });
+
+  let output = "";
+  const capture = (buf: Buffer) => {
+    if (output.length < 8000) output += buf.toString();
+  };
+  child.stdout?.on("data", capture);
+  child.stderr?.on("data", capture);
+
   child.on("error", (err) => log(`job spawn failed: ${err}`));
+  // "exit", not "close": a grandchild holding the pipes open must not delay the report.
+  child.on("exit", (code, signal) => {
+    const why = signal ? `signal ${signal}` : `exit ${code}`;
+    const tail = output.trim().slice(-1200);
+    // Logged even on success: herdr-layout.local deliberately exits 0 on its
+    // worst cases (agent_name_taken, a failed agent start, claude never idle),
+    // so a worktree with no claude in it looks like a clean launch from here.
+    if (tail) log(`job launcher output (${why}) thread=${job.threadTs}: ${tail}`);
+    if (code === 0) return;
+    log(`job launcher failed (${why}) thread=${job.threadTs}`);
+    void client.chat
+      .postMessage({
+        channel: job.channel,
+        thread_ts: job.threadTs,
+        text: `❌ Couldn't launch the worktree job (${why}).${tail ? `\n\`\`\`\n${tail}\n\`\`\`` : ""}`,
+      })
+      .catch((err) => log(`job failure report failed: ${err}`));
+  });
+
   child.unref();
   log(`job spawned: pid=${child.pid} thread=${job.threadTs}`);
 }

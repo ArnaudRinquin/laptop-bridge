@@ -84,24 +84,47 @@ test("register_job stores the session location for follow-up routing", async () 
   const res = await callTool("register_job", {
     threadTs: "job.1",
     cwd: "/tmp/worktrees/monorepo.slack-1",
-    tmuxPane: "%7",
+    paneId: "w7:p2",
     pid: 4242,
   });
   expect(res.result.isError).toBeUndefined();
-  expect(jobs.get("job.1")).toMatchObject({ cwd: "/tmp/worktrees/monorepo.slack-1", tmuxPane: "%7" });
+  expect(jobs.get("job.1")).toMatchObject({ cwd: "/tmp/worktrees/monorepo.slack-1", paneId: "w7:p2" });
 });
+
+const tmuxPane = (id: string, path: string, command: string) =>
+  ({ id, path, command, mux: "tmux" }) as const;
+const herdrPane = (id: string, path: string, command: string, foregroundPath?: string) =>
+  ({ id, path, foregroundPath, command, mux: "herdr" }) as const;
 
 test("findPane: verifies by cwd, prefers registered pane, survives pane-id recycling", async () => {
   const job = { threadTs: "t", cwd: "/wt/a", tmuxPane: "%3", registeredAt: Date.now() };
-  const claude = { id: "%9", path: "/wt/a", command: "2.1.211" };
-  const shell = { id: "%4", path: "/wt/a", command: "zsh" };
+  const claude = tmuxPane("%9", "/wt/a", "2.1.211");
+  const shell = tmuxPane("%4", "/wt/a", "zsh");
 
   // registered pane id wins when it's still in the right cwd
-  expect(findPane([shell, { id: "%3", path: "/wt/a", command: "zsh" }, claude], job)?.id).toBe("%3");
+  expect(findPane([shell, tmuxPane("%3", "/wt/a", "zsh"), claude], job)?.id).toBe("%3");
   // recycled pane id (now in another cwd) is ignored → claude-looking pane wins
-  expect(findPane([{ id: "%3", path: "/wt/OTHER", command: "zsh" }, shell, claude], job)?.id).toBe("%9");
+  expect(findPane([tmuxPane("%3", "/wt/OTHER", "zsh"), shell, claude], job)?.id).toBe("%9");
   // no pane in the worktree → undefined (fallback: fresh spawn)
-  expect(findPane([{ id: "%3", path: "/wt/OTHER", command: "zsh" }], job)).toBeUndefined();
+  expect(findPane([tmuxPane("%3", "/wt/OTHER", "zsh")], job)).toBeUndefined();
+});
+
+test("findPane: herdr panes, mixed lists, and foreground cwd", async () => {
+  const job = { threadTs: "t", cwd: "/wt/a", paneId: "w7:p2", registeredAt: Date.now() };
+  const claude = herdrPane("w7:p2", "/wt/a", "claude");
+  const shell = herdrPane("w7:p1", "/wt/a", "arnaud@mbp:~/wt/a");
+
+  // registered herdr pane id wins
+  expect(findPane([shell, claude], job)?.id).toBe("w7:p2");
+  // reassigned id (pane moved workspaces) → the agent-labelled pane wins
+  expect(findPane([herdrPane("w7:p2", "/wt/OTHER", "zsh"), shell, herdrPane("w9:p3", "/wt/a", "claude")], job)?.id).toBe(
+    "w9:p3",
+  );
+  // a running foreground command moves cwd off the worktree — foreground_cwd still matches
+  expect(findPane([herdrPane("w9:p4", "/elsewhere", "claude", "/wt/a")], job)?.id).toBe("w9:p4");
+  // pre-migration record (tmuxPane only) still routes to its tmux pane in a merged list
+  const legacy = { threadTs: "t", cwd: "/wt/a", tmuxPane: "%3", registeredAt: Date.now() };
+  expect(findPane([herdrPane("w7:p9", "/wt/b", "claude"), tmuxPane("%3", "/wt/a", "zsh")], legacy)?.mux).toBe("tmux");
 });
 
 test("initialize + tools/list exposes the 5 tools", async () => {

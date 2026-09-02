@@ -24,15 +24,18 @@ function buildServer(ops: StreamOps, jobs: JobsIndex): McpServer {
       inputSchema: {
         threadTs: z.string().describe("The thread token you were handed at launch (SLACK_THREAD_TS)"),
         cwd: z.string().describe("Absolute path of your working directory (the worktree)"),
-        tmuxPane: z.string().optional().describe("$TMUX_PANE if set (e.g. %42)"),
+        paneId: z
+          .string()
+          .optional()
+          .describe("$HERDR_PANE_ID (e.g. w7:p2), or $TMUX_PANE (e.g. %42) on the tmux fallback"),
         pid: z.number().optional().describe("Your process pid"),
         branch: z.string().optional().describe("Git branch, if known"),
       },
     },
-    async ({ threadTs, cwd, tmuxPane, pid, branch }) => {
+    async ({ threadTs, cwd, paneId, pid, branch }) => {
       try {
-        jobs.set({ threadTs, cwd, tmuxPane, pid, branch, registeredAt: Date.now() });
-        return ok(`registered: follow-ups to this thread will be routed to ${tmuxPane ?? cwd}`);
+        jobs.set({ threadTs, cwd, paneId, pid, branch, registeredAt: Date.now() });
+        return ok(`registered: follow-ups to this thread will be routed to ${paneId ?? cwd}`);
       } catch (err) {
         return fail(err);
       }

@@ -51,7 +51,7 @@ Set `jobCommand` in the config — a zsh command run per mention with env:
 | `SLACK_MCP_URL` | `http://127.0.0.1:8365/mcp` |
 
 Example: `"jobCommand": "/Users/you/projects/slack-to-laptop/scripts/launch-job.zsh"` —
-see `scripts/launch-job.zsh` (machine-specific: tmux session + repo hardcoded).
+see `scripts/launch-job.zsh` (machine-specific: herdr + repo hardcoded).
 It spawns a worktree Claude with prompt `/slack-ta [threadTs:$SLACK_THREAD_TS] $SLACK_PROMPT`:
 the token travels *inside the prompt*, since the job's Claude only sees what the
 skill receives (see "Job-side skill" below).
@@ -66,7 +66,7 @@ claude mcp add --transport http --scope user slack-stream http://127.0.0.1:8365/
 
 All take `threadTs` (from `SLACK_THREAD_TS`):
 
-- `register_job({threadTs, cwd, tmuxPane?, pid?, branch?})` — call once at boot; where the session lives, for follow-up routing
+- `register_job({threadTs, cwd, paneId?, pid?, branch?})` — call once at boot; where the session lives, for follow-up routing (`paneId` = `$HERDR_PANE_ID`, or `$TMUX_PANE` on the tmux fallback)
 - `thinking_step({threadTs, title, status, id?, details?})` — checklist step; `status ∈ pending|in_progress|complete|error`; same `id`/title updates the step
 - `append_text({threadTs, markdown})` — prose in the progress message (important mid-course findings only)
 - `set_status({threadTs, text})` — grey "is …" line; `""` clears
@@ -76,14 +76,45 @@ All take `threadTs` (from `SLACK_THREAD_TS`):
 
 Mentioning the bot again in a job's thread does NOT spawn a second job: the
 bridge looks the thread up in `~/.cache/slack-to-laptop/jobs.json` (written by
-`register_job`, survives `finish` for 7 days), verifies the session's tmux pane
-still sits in the job's worktree (pane ids get recycled — cwd is ground truth),
-and types `[slack follow-up threadTs:…] <text>` into that Claude session via
-`tmux send-keys` — mid-work it's a steering message, after finish a new turn
-with full context. A stream is reopened first if needed ("Reconnecting to
-session…"). If the pane is gone, it falls back to spawning a fresh job with a
-note. Only the typing is tmux-specific (`src/inject.ts`); finding the session
-is registration-based and generic.
+`register_job`, survives `finish` for 7 days), verifies the session's pane
+still sits in the job's worktree (a pane id alone is not a handle — tmux
+recycles them, herdr re-issues them on `pane move` — so cwd is ground truth),
+and types `[slack follow-up threadTs:…] <text>` into that Claude session —
+mid-work it's a steering message, after finish a new turn with full context. A
+stream is reopened first if needed ("Reconnecting to session…"). If the pane is
+gone, it falls back to spawning a fresh job with a note. Only the typing is
+multiplexer-specific (`src/inject.ts`); finding the session is
+registration-based and generic.
+
+## Multiplexers (herdr + tmux)
+
+Jobs run under [herdr](https://herdr.dev); tmux is still read for follow-up
+routing, so sessions started before the migration stay reachable.
+
+- **Launching** (`scripts/launch-job.zsh`) is herdr-only. It sets `HERDR_ENV=1`
+  and runs `wt spawn` directly — no throwaway window. The tmux version needed
+  one because the monorepo's `setup-tmux` hook exits silently without `$TMUX`;
+  herdr's layout drives the herdr server over its socket, so nothing has to run
+  inside a pane. If no server is up (fresh boot) it starts one headless, the
+  counterpart of `tmux new-session -d`.
+- **Follow-ups** (`src/inject.ts`) list *both* multiplexers and merge the
+  panes; a dead one can't hide the other's. Each pane carries its `mux`, and
+  the injection dispatches on it: `herdr pane send-text` + an `enter` key, or
+  `tmux send-keys -l` + `Enter`.
+- herdr labels the recognised agent outright (`"agent": "claude"`), so no
+  command-name guessing is needed on that side; the tmux heuristic (the claude
+  CLI shows up as its version number) still covers tmux panes.
+
+Two gotchas, both measured:
+
+- **`herdr agent prompt` does not deliver here** — the text never reaches
+  Claude's input box and, without `--wait`, it reports success anyway.
+  `pane send-text` does deliver. (Same finding as the monorepo's
+  `herdr-layout.local`, which passes the prompt as claude's own CLI argument.)
+- **The herdr CLI resolves its socket from `$HOME`**, which the SwiftBar-launched
+  bridge can't be assumed to have — so `herdrSocket` is passed explicitly as
+  `HERDR_SOCKET_PATH` on every call. `herdr status server` always exits 0; its
+  state is in the output, not the code.
 
 Future idea (deliberately not built): worktree cleanup on job end conflicts
 with follow-ups — the kept-alive session is what makes them possible. Cleanest
@@ -149,7 +180,7 @@ in an afternoon — here's the TL;DR to hand your agent (or read yourself).
 **The one design trick**: the job never holds Slack credentials or message
 ids. It only knows `threadTs` — a correlation token passed inside its prompt —
 and the bridge maps it to the real channel/message and owns the token. Any
-runner (tmux, container, CI, SSH) works as long as the token rides along and
+runner (herdr, tmux, container, CI, SSH) works as long as the token rides along and
 the runner can reach `127.0.0.1:8365`.
 
 **The Slack rendering strategy** (the hard-won part — all measured, none
@@ -169,7 +200,8 @@ documented; see the section above for detail):
 to disk — that's what makes bridge restarts invisible to running jobs (replay
 log re-renders the whole message). A second file maps `threadTs → session
 location` so re-mentions in a thread route INTO the running session (here:
-`tmux send-keys`, cwd-verified) instead of spawning a duplicate.
+`herdr pane send-text` or `tmux send-keys`, cwd-verified) instead of spawning a
+duplicate.
 
 **Reliability floor**: dedupe redelivered Slack events (3s ack window); a
 stale sweep for jobs that die without `finish`; every Slack write has a
@@ -177,7 +209,7 @@ fallback chain ending in plain `chat.postMessage`.
 
 **Adaptation points** — each is one file here: how jobs launch
 (`scripts/launch-job.zsh` — swap for docker/ssh/whatever), how follow-ups
-reach a session (`src/inject.ts` — the only tmux-specific code), what the
+reach a session (`src/inject.ts` — the only multiplexer-specific code), what the
 agent streams (your job-side skill/prompt: milestones as `thinking_step`,
 summary in `finish(markdown)`, ALWAYS finish — also on failure).
 

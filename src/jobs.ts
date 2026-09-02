@@ -12,7 +12,9 @@ export interface JobRecord {
   threadTs: string;
   /** Worktree the job runs in — ground truth for pane verification. */
   cwd: string;
-  /** $TMUX_PANE at registration (e.g. "%42"). Pane ids get recycled — always verify against cwd. */
+  /** Pane hosting the session: $HERDR_PANE_ID ("w7:p2") or $TMUX_PANE ("%42"). Never trusted alone — always verified against cwd. */
+  paneId?: string;
+  /** Pre-herdr name for `paneId`. Read-only: persisted records written before the migration still carry it. */
   tmuxPane?: string;
   pid?: number;
   branch?: string;
