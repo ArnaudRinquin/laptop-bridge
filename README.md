@@ -10,6 +10,8 @@ this process maps it to the real Slack stream id. The map is snapshotted to
 crashes) doesn't interrupt running jobs: on boot, restored streams are
 force-rotated by the first keepalive tick — rotation doubles as recovery.
 
+How it's built / build your own: [RECIPE.md](RECIPE.md).
+
 ## Slack app (one-time)
 
 1. <https://api.slack.com/apps> → Create New App → From scratch.
@@ -105,47 +107,12 @@ routing, so sessions started before the migration stay reachable.
   command-name guessing is needed on that side; the tmux heuristic (the claude
   CLI shows up as its version number) still covers tmux panes.
 
-Two gotchas, both measured:
-
-- **`herdr agent prompt` does not deliver here** — the text never reaches
-  Claude's input box and, without `--wait`, it reports success anyway.
-  `pane send-text` does deliver. (Same finding as the monorepo's
-  `herdr-layout.local`, which passes the prompt as claude's own CLI argument.)
-- **The herdr CLI resolves its socket from `$HOME`**, which the SwiftBar-launched
-  bridge can't be assumed to have — so `herdrSocket` is passed explicitly as
-  `HERDR_SOCKET_PATH` on every call. `herdr status server` always exits 0; its
-  state is in the output, not the code.
-
-Future idea (deliberately not built): worktree cleanup on job end conflicts
-with follow-ups — the kept-alive session is what makes them possible. Cleanest
-shape: an explicit "cleanup" follow-up telling the session itself to remove its
-worktree and exit.
+Measured herdr gotchas: see [RECIPE.md](RECIPE.md#design-decisions--gotchas).
 
 A job that dies without `finish` gets swept: streams idle > `staleStreamMinutes` are stopped and cleared.
 
-Slack hard-kills a stream ~5:00 after it opens, no matter what is appended
-(undocumented; measured — a true keepalive is impossible, even with changing
-content), and there is no way to re-stream onto an existing `ts`. Each job
-therefore gets ONE progress message: it streams natively while young (full
-card UI), is stopped cleanly at age ~3.5–4.5 min, and is edited in place via
-`chat.update` from then on (works on stopped streamed messages — measured).
-Conversion keeps the NATIVE cards: `task_card` is a real Block Kit block
-(changelog 2026-02-11), accepted by `chat.update` even on a stopped stream
-(measured) — the message re-renders from the replay log with identical card
-UI. No splits, no dup cards, no pings, no visual downgrade. The final report
-is the only other message — posted on `finish(markdown)`, one notification,
-exactly when you want it.
-
-Block-form quirks vs the chunk form (measured): `task_card` blocks REQUIRE
-`status` and reject `"pending"` (enum `in_progress|complete|error`) — pending
-steps simply aren't rendered yet; the `plan` block's `title` must be a plain
-string, not a `plain_text` object.
-
-API gotchas (measured): `chat.stopStream` with `markdown_text` only works on a
-stream with NO chunks appended — `streaming_mode_mismatch` otherwise (the
-report is delivered as a chunkless stream + markdown-stop for the native
-agent look). Frozen `in_progress` cards render with a ⚠️ — finish completes
-them before its plain stop.
+Why each job gets ONE progress message (stream, then `chat.update` edits after
+~3.5 min) and the Slack API quirks behind it: see [RECIPE.md](RECIPE.md#design-decisions--gotchas).
 
 ## Job-side skill
 
@@ -161,57 +128,11 @@ continue the work, stop streaming.
 
 `GET /healthz` lists active streams.
 
-## Build your own
+## How it's built
 
-Want the same thing but different? The architecture is small enough to rebuild
-in an afternoon — here's the TL;DR to hand your agent (or read yourself).
-
-**The shape.** One long-lived local process with three roles:
-
-1. **Listener** — Slack Socket Mode (`@slack/bolt`), subscribed to
-   `app_mention`. On mention: open the progress message instantly (so the user
-   sees life before any job boots), then spawn the job however you like.
-2. **Bridge** — a local HTTP MCP server (`@modelcontextprotocol/sdk`,
-   stateless transport). The job's agent calls 5 tools: `register_job`,
-   `thinking_step`, `append_text`, `set_status`, `finish`.
-3. **Status** — optional (here: SwiftBar menubar). Any observer works;
-   `GET /healthz` is the hook.
-
-**The one design trick**: the job never holds Slack credentials or message
-ids. It only knows `threadTs` — a correlation token passed inside its prompt —
-and the bridge maps it to the real channel/message and owns the token. Any
-runner (herdr, tmux, container, CI, SSH) works as long as the token rides along and
-the runner can reach `127.0.0.1:8365`.
-
-**The Slack rendering strategy** (the hard-won part — all measured, none
-documented; see the section above for detail):
-
-- Native streams (`chat.startStream`) look great but die ~5:00 in, no
-  keepalive possible, no re-stream onto the same ts.
-- `chat.update` works on stopped streamed messages, edits never ping.
-- `task_card` is a real Block Kit block — `chat.update` can render the SAME
-  native card UI forever. Quirks: `status` required, `"pending"` rejected,
-  `plan.title` must be a plain string.
-- ⇒ one message per job: stream while young, convert to edit-in-place at
-  ~3.5 min, keep native cards throughout. Final report = separate message =
-  the single notification.
-
-**State**: one JSON map `threadTs → {messageTs, mode, replayLog}` snapshotted
-to disk — that's what makes bridge restarts invisible to running jobs (replay
-log re-renders the whole message). A second file maps `threadTs → session
-location` so re-mentions in a thread route INTO the running session (here:
-`herdr pane send-text` or `tmux send-keys`, cwd-verified) instead of spawning a
-duplicate.
-
-**Reliability floor**: dedupe redelivered Slack events (3s ack window); a
-stale sweep for jobs that die without `finish`; every Slack write has a
-fallback chain ending in plain `chat.postMessage`.
-
-**Adaptation points** — each is one file here: how jobs launch
-(`scripts/launch-job.zsh` — swap for docker/ssh/whatever), how follow-ups
-reach a session (`src/inject.ts` — the only multiplexer-specific code), what the
-agent streams (your job-side skill/prompt: milestones as `thinking_step`,
-summary in `finish(markdown)`, ALWAYS finish — also on failure).
+Architecture, build-your-own steps, and the measured Slack/herdr/SwiftBar
+gotchas (5-min stream kill, edit-in-place conversion, block quirks, pane
+verification…) live in [RECIPE.md](RECIPE.md).
 
 ## SwiftBar
 
