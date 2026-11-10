@@ -180,6 +180,16 @@ this process issued. `/mcp`, `/install/linear` and `/open/*` are localhost only.
 - `linear_plan({session, items})` — the session's checklist (full list each time).
 - `linear_graphql({query, variables?})` — anything else, as the app: read the
   project, create and move issues, post project updates.
+- `linear_issue_search({query, team?})` / `linear_issue_create({team, title,
+  description?, labels?, project?, state?, priority?})` — file a follow-up or a
+  papercut in one call; labels, project and status go by name. The trigger
+  status is refused.
+- `linear_adopt({project, cwd, paneId?, branch?})` — attach a worktree that was
+  NOT started from Linear to a project, so the project's messages reach it.
+
+A session without the MCP server connected can call the same tools through the
+running bridge: `bun scripts/linear.ts <tool> '<json args>'` (no arguments lists
+them). The script never touches the Linear token.
 
 **Open in Orca.** `GET /open/<lane>` runs `orca worktree activate` on the lane's
 worktree. The link is attached in Linear as `http://127.0.0.1:8365/open/<lane>`,

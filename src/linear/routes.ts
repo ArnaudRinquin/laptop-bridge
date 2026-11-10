@@ -8,7 +8,7 @@ import type { LinearConfig } from "../config";
 import type { LinearClient } from "./client";
 
 export const EVENTS_PATH = join(homedir(), ".cache", "slack-to-laptop", "linear-events.jsonl");
-const SCOPES = "read,write,app:assignable,app:mentionable";
+const SCOPES = "read,write,app:assignable,app:mentionable,initiative:read,initiative:write";
 const MAX_SKEW_MS = 60_000;
 
 export function verifySignature(secret: string, rawBody: Buffer, signature: string | undefined) {

@@ -21,6 +21,7 @@ export function registerLinearTools(
   lanes: LaneIndex,
   port: number,
   onRegistered: (laneKey: string) => Promise<number>,
+  triggerStatus: string,
 ) {
   server.registerTool(
     "linear_register",
@@ -126,6 +127,145 @@ export function registerLinearTools(
     async ({ query, variables }) => {
       try {
         return ok(JSON.stringify(await client.graphql(query, variables ?? {})));
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  const resolveTeam = async (key: string) => {
+    const { teams } = await client.graphql<{ teams: { nodes: { id: string; key: string; states: { nodes: { id: string; name: string }[] } }[] } }>(
+      `{ teams { nodes { id key states { nodes { id name } } } } }`,
+    );
+    const team = teams.nodes.find((t) => t.key.toLowerCase() === key.toLowerCase());
+    if (!team) throw new Error(`unknown team ${key} (have: ${teams.nodes.map((t) => t.key).join(", ")})`);
+    return team;
+  };
+  const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+
+  server.registerTool(
+    "linear_issue_search",
+    {
+      description: "Find issues by text in title or description — check for a duplicate before filing one.",
+      inputSchema: { query: z.string(), team: z.string().optional().describe('Team key, e.g. "RBD"') },
+    },
+    async ({ query, team }) => {
+      try {
+        const text = { or: [{ title: { containsIgnoreCase: query } }, { description: { containsIgnoreCase: query } }] };
+        const filter = team ? { and: [text, { team: { key: { eq: team.toUpperCase() } } }] } : text;
+        const { issues } = await client.graphql<{ issues: { nodes: unknown[] } }>(
+          `query ($filter: IssueFilter) { issues(filter: $filter, first: 15) { nodes { identifier title url state { name } project { name } } } }`,
+          { filter },
+        );
+        return ok(JSON.stringify(issues.nodes));
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "linear_issue_create",
+    {
+      description:
+        "File an issue (follow-up, bug, papercut, decision…). Labels, project and state are given by name. Returns the identifier and URL.",
+      inputSchema: {
+        team: z.string().describe('Team key, e.g. "RBD"'),
+        title: z.string(),
+        description: z.string().optional().describe("Markdown"),
+        labels: z.array(z.string()).optional().describe('Label names, e.g. ["papercut", "area:ci"]'),
+        project: z.string().optional().describe("Project name"),
+        state: z.string().optional().describe("Status name; defaults to the team's default"),
+        priority: z.number().int().min(0).max(4).optional().describe("0 none, 1 urgent, 2 high, 3 medium, 4 low"),
+      },
+    },
+    async ({ team, title, description, labels, project, state, priority }) => {
+      try {
+        if (state && same(state, triggerStatus)) throw new Error(`"${triggerStatus}" is the user's trigger — pick another status`);
+        const t = await resolveTeam(team);
+        const input: Record<string, unknown> = { teamId: t.id, title, description, priority };
+        if (state) {
+          const s = t.states.nodes.find((x) => same(x.name, state));
+          if (!s) throw new Error(`unknown status "${state}" (have: ${t.states.nodes.map((x) => x.name).join(", ")})`);
+          input.stateId = s.id;
+        }
+        if (labels?.length) {
+          const { issueLabels } = await client.graphql<{ issueLabels: { nodes: { id: string; name: string }[] } }>(
+            `{ issueLabels(first: 250) { nodes { id name } } }`,
+          );
+          input.labelIds = labels.map((name) => {
+            const l = issueLabels.nodes.find((x) => same(x.name, name));
+            if (!l) throw new Error(`unknown label "${name}" (have: ${issueLabels.nodes.map((x) => x.name).join(", ")})`);
+            return l.id;
+          });
+        }
+        if (project) {
+          const { projects } = await client.graphql<{ projects: { nodes: { id: string; name: string }[] } }>(
+            `{ projects(first: 250) { nodes { id name } } }`,
+          );
+          const p = projects.nodes.find((x) => same(x.name, project));
+          if (!p) throw new Error(`unknown project "${project}"`);
+          input.projectId = p.id;
+        }
+        const { issueCreate } = await client.graphql<{ issueCreate: { issue: { identifier: string; url: string } } }>(
+          `mutation ($input: IssueCreateInput!) { issueCreate(input: $input) { issue { identifier url } } }`,
+          { input },
+        );
+        return ok(`${issueCreate.issue.identifier} ${issueCreate.issue.url}`);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "linear_adopt",
+    {
+      description:
+        "Attach an EXISTING worktree and its Claude session to a Linear project, so the project's issues, mentions and follow-ups are routed to this session instead of a new worktree. For lanes that were not started from Linear.",
+      inputSchema: {
+        project: z.string().describe("Linear project name or id"),
+        cwd: z.string().describe("Absolute path of the worktree"),
+        paneId: z.string().optional().describe("$ORCA_TERMINAL_HANDLE of the Claude terminal"),
+        branch: z.string().optional(),
+      },
+    },
+    async ({ project, cwd, paneId, branch }) => {
+      try {
+        const { projects } = await client.graphql<{ projects: { nodes: { id: string; name: string; slugId: string; url: string }[] } }>(
+          `{ projects(first: 250) { nodes { id name slugId url } } }`,
+        );
+        const p = projects.nodes.find((x) => x.id === project || same(x.name, project));
+        if (!p) throw new Error(`unknown project "${project}"`);
+        const key = `p-${p.slugId}`;
+        const previous = lanes.get(key);
+        lanes.set({
+          key,
+          kind: "project",
+          name: p.name,
+          url: p.url,
+          projectId: p.id,
+          repo: previous?.repo ?? cwd,
+          branch: branch ?? previous?.branch ?? "",
+          cwd,
+          paneId,
+          sessions: previous?.sessions ?? [],
+          pending: previous?.pending,
+          launchedAt: previous?.launchedAt ?? Date.now(),
+          registeredAt: Date.now(),
+        });
+        const link = openInOrcaLink(port, key);
+        const { project: full } = await client.graphql<{ project: { externalLinks: { nodes: { url: string }[] } } }>(
+          `query ($id: String!) { project(id: $id) { externalLinks { nodes { url } } } }`,
+          { id: p.id },
+        );
+        if (!full.externalLinks.nodes.some((l) => l.url === link.url)) {
+          await client.graphql(`mutation ($input: EntityExternalLinkCreateInput!) { entityExternalLinkCreate(input: $input) { success } }`, {
+            input: { projectId: p.id, ...link },
+          });
+        }
+        setTimeout(() => void onRegistered(key).catch(() => {}), 3000).unref();
+        return ok(`adopted: project "${p.name}" → lane ${key} in ${cwd}. Messages on its issues now reach this session.`);
       } catch (err) {
         return fail(err);
       }

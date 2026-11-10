@@ -62,7 +62,7 @@ const httpServer = startMcpHttp(config.port, ops, registry, jobs, {
     log(`Linear front door on (${linearClient.installed ? "installed" : "not installed — open /install/linear"})`);
   },
   registerTools: (server) => {
-    if (linearClient && linearHandler) registerLinearTools(server, linearClient, lanes, config.port, linearHandler.flushPending);
+    if (linearClient && linearHandler) registerLinearTools(server, linearClient, lanes, config.port, linearHandler.flushPending, linear.triggerStatus);
   },
 });
 const slackApp = createSlackApp(config, registry, ops, jobs);
