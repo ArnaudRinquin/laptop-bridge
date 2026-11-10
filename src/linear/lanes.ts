@@ -28,6 +28,12 @@ export interface Lane {
   pending?: string[];
 }
 
+/** Localhost-only: clicked on the laptop, brings the lane's worktree forward in Orca. */
+export const openInOrcaLink = (port: number, laneKey: string) => ({
+  label: "Open in Orca",
+  url: `http://127.0.0.1:${port}/open/${encodeURIComponent(laneKey)}`,
+});
+
 export class LaneIndex {
   private map = new Map<string, Lane>();
 

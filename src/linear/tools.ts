@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { postActivity } from "./handler";
 import type { LinearClient } from "./client";
-import type { LaneIndex } from "./lanes";
+import { openInOrcaLink, type LaneIndex } from "./lanes";
 
 const ok = (text: string) => ({ content: [{ type: "text" as const, text }] });
 const fail = (err: unknown) => ({
@@ -22,8 +22,6 @@ export function registerLinearTools(
   port: number,
   onRegistered: (laneKey: string) => Promise<number>,
 ) {
-  const openUrl = (key: string) => `http://127.0.0.1:${port}/open/${encodeURIComponent(key)}`;
-
   server.registerTool(
     "linear_register",
     {
@@ -43,22 +41,23 @@ export function registerLinearTools(
         lanes.set({ ...record, cwd, paneId: paneId ?? record.paneId, branch: branch ?? record.branch, registeredAt: Date.now() });
         // After this tool returns, so the held messages land once Claude is back at its prompt.
         setTimeout(() => void onRegistered(lane).catch(() => {}), 3000).unref();
-        const link = { label: "Open in Orca", url: openUrl(lane) };
+        // Sessions get their link when they join the lane (handler); the project gets it once, here.
+        const link = openInOrcaLink(port, lane);
         const notes: string[] = [];
-        for (const id of record.sessions) {
-          await client
-            .graphql(`mutation ($id: String!, $input: AgentSessionUpdateInput!) { agentSessionUpdate(id: $id, input: $input) { success } }`, {
-              id,
-              input: { addedExternalUrls: [link] },
-            })
-            .catch((err) => notes.push(`session link failed: ${err.message}`));
-        }
         if (record.projectId) {
-          await client
-            .graphql(`mutation ($input: EntityExternalLinkCreateInput!) { entityExternalLinkCreate(input: $input) { success } }`, {
-              input: { projectId: record.projectId, ...link },
-            })
-            .catch((err) => notes.push(`project link failed: ${err.message}`));
+          try {
+            const { project } = await client.graphql<{ project: { externalLinks: { nodes: { url: string }[] } } }>(
+              `query ($id: String!) { project(id: $id) { externalLinks { nodes { url } } } }`,
+              { id: record.projectId },
+            );
+            if (!project.externalLinks.nodes.some((l) => l.url === link.url)) {
+              await client.graphql(`mutation ($input: EntityExternalLinkCreateInput!) { entityExternalLinkCreate(input: $input) { success } }`, {
+                input: { projectId: record.projectId, ...link },
+              });
+            }
+          } catch (err) {
+            notes.push(`project link failed: ${err instanceof Error ? err.message : err}`);
+          }
         }
         return ok(`registered lane ${lane} (${record.kind}: ${record.name}). ${notes.join("; ")}`);
       } catch (err) {

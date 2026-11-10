@@ -2,7 +2,7 @@ import { log } from "../log";
 import type { Config, LinearConfig } from "../config";
 import { injectText, listPanes, type Pane } from "../inject";
 import type { LinearClient } from "./client";
-import type { Lane, LaneIndex } from "./lanes";
+import { openInOrcaLink, type Lane, type LaneIndex } from "./lanes";
 import type { Launcher } from "./launch";
 import type { LinearEventHandler } from "./routes";
 
@@ -150,6 +150,13 @@ export function createLinearHandler(deps: HandlerDeps): LinearHandler {
     const key = issue.project ? `p-${issue.project.slugId}` : issue.identifier;
     const existing = lanes.get(key);
     const tag = `[linear session:${sessionId} issue:${issue.identifier}]`;
+    // On every session, whenever it joins the lane — not only those known when the lane registers.
+    void client
+      .graphql(`mutation ($id: String!, $input: AgentSessionUpdateInput!) { agentSessionUpdate(id: $id, input: $input) { success } }`, {
+        id: sessionId,
+        input: { addedExternalUrls: [openInOrcaLink(config.port, key)] },
+      })
+      .catch((err) => log(`linear: Open in Orca link failed for session ${sessionId}: ${err}`));
 
     if (existing) {
       lanes.set({ ...existing, sessions: [...new Set([...existing.sessions, sessionId])] });

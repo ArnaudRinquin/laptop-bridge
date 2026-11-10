@@ -80,7 +80,8 @@ function harness(
   opts: { bootGraceMs?: number; failLaunches?: number } = {},
 ) {
   let failLaunches = opts.failLaunches ?? 0;
-  const calls: { launches: { repo: string; prompt: string }[]; injected: string[]; activities: { session: string; type: string }[] } = {
+  const calls: { launches: { repo: string; prompt: string }[]; injected: string[]; activities: { session: string; type: string }[]; links: string[] } = {
+    links: [],
     launches: [],
     injected: [],
     activities: [],
@@ -91,6 +92,10 @@ function harness(
     graphql: async (query: string, vars: Record<string, any>) => {
       if (query.includes("agentActivityCreate")) {
         calls.activities.push({ session: vars.input.agentSessionId, type: vars.input.content.type });
+        return {};
+      }
+      if (query.includes("agentSessionUpdate")) {
+        calls.links.push(`${vars.id} ${vars.input.addedExternalUrls[0].url}`);
         return {};
       }
       if (query.includes("agentSessionCreateOnIssue")) return { agentSessionCreateOnIssue: { agentSession: { id: `own-${++sessionSeq}` } } };
@@ -110,7 +115,7 @@ function harness(
   } as unknown as LinearClient;
   const lanes = new LaneIndex();
   const { handle, flushPending } = createLinearHandler({
-    config: {} as Config,
+    config: { port: 8365 } as Config,
     linear: LINEAR,
     client,
     lanes,
@@ -161,6 +166,8 @@ test("issues of one project share a lane; follow-ups are typed into it", async (
     "[linear follow-up session:s1] also this",
   ]);
   expect(h.lanes.get("p-abc123")?.sessions).toEqual(["s1", "s2"]);
+  // every session of the lane carries the link, including the one that joined later
+  expect(h.calls.links).toEqual(["s1 http://127.0.0.1:8365/open/p-abc123", "s2 http://127.0.0.1:8365/open/p-abc123"]);
 });
 
 test("a dead session relaunches the lane", async () => {
