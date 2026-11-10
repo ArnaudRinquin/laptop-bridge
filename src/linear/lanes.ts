@@ -52,6 +52,11 @@ export class LaneIndex {
     return this.values().find((l) => l.sessions.includes(sessionId));
   }
 
+  delete(key: string) {
+    this.map.delete(key);
+    this.persist();
+  }
+
   set(lane: Lane) {
     this.map.set(lane.key, lane);
     this.persist();

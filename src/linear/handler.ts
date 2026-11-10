@@ -1,6 +1,6 @@
 import { log } from "../log";
 import type { Config, LinearConfig } from "../config";
-import { findPane, injectText, listPanes, type Pane } from "../inject";
+import { injectText, listPanes, type Pane } from "../inject";
 import type { LinearClient } from "./client";
 import type { Lane, LaneIndex } from "./lanes";
 import type { Launcher } from "./launch";
@@ -35,6 +35,7 @@ export interface HandlerDeps {
   /** Injectable for tests. */
   panes?: () => Promise<Pane[]>;
   inject?: (pane: Pane, text: string) => Promise<void>;
+  bootGraceMs?: number;
 }
 
 const oneLine = (s: string, max = 600) => s.replace(/\s+/g, " ").trim().slice(0, max);
@@ -59,6 +60,7 @@ export function createLinearHandler(deps: HandlerDeps): LinearHandler {
   const { config, linear, client, lanes, launch } = deps;
   const panes = deps.panes ?? (() => listPanes(config));
   const inject = deps.inject ?? ((pane, text) => injectText(config, pane, text));
+  const bootGraceMs = deps.bootGraceMs ?? BOOT_GRACE_MS;
   /** Sessions this process created itself — Linear may echo them back as `created`. */
   const ownSessions = new Set<string>();
   /** Serialises routing: two events for one project must not create two worktrees. */
@@ -69,33 +71,53 @@ export function createLinearHandler(deps: HandlerDeps): LinearHandler {
     return next;
   };
 
-  const livePane = async (lane: Lane, all?: Pane[]) =>
-    lane.cwd ? findPane(all ?? (await panes()), { threadTs: lane.key, cwd: lane.cwd, paneId: lane.paneId, registeredAt: 0 }) : undefined;
+  /**
+   * The lane's Claude terminal. Stricter than the Slack side's findPane: a
+   * worktree also has plain tabs (a dev server…), and typing a message into
+   * one of those would lose it while the lane still looked alive.
+   */
+  const livePane = async (lane: Lane, all?: Pane[]) => {
+    if (!lane.cwd) return undefined;
+    const inWorktree = (all ?? (await panes())).filter((p) => p.path === lane.cwd || p.foregroundPath === lane.cwd);
+    return inWorktree.find((p) => p.id === lane.paneId) ?? inWorktree.find((p) => /^claude/i.test(p.command));
+  };
 
-  const booting = (lane: Lane) => !lane.registeredAt && Date.now() - lane.launchedAt < BOOT_GRACE_MS;
+  const booting = (lane: Lane) => !lane.registeredAt && Date.now() - lane.launchedAt < bootGraceMs;
 
-  /** Type into the lane, or hold the message while Claude is not listening yet. */
-  async function deliver(lane: Lane, text: string): Promise<"sent" | "queued" | "gone"> {
+  /** Type into the lane (held messages first), or hold the message while Claude is not listening yet. */
+  async function deliver(key: string, text?: string): Promise<"sent" | "queued" | "gone"> {
+    const lane = lanes.get(key)!;
+    const pending = [...(lane.pending ?? []), ...(text ? [text] : [])];
     if (booting(lane)) {
-      lanes.set({ ...lanes.get(lane.key)!, pending: [...(lanes.get(lane.key)!.pending ?? []), text] });
+      lanes.set({ ...lane, pending });
       return "queued";
     }
     const pane = await livePane(lane);
+    // The caller relaunches with `text` in the new prompt; earlier held messages stay on the record.
     if (!pane) return "gone";
-    await inject(pane, text);
+    lanes.set({ ...lane, pending: [] });
+    for (const t of pending) await inject(pane, t);
     return "sent";
   }
 
   async function flushPending(laneKey: string) {
-    const lane = lanes.get(laneKey);
-    if (!lane?.pending?.length) return 0;
-    const pane = await livePane(lane);
-    if (!pane) return 0;
-    const pending = lane.pending;
-    lanes.set({ ...lane, pending: [] });
-    for (const text of pending) await inject(pane, text);
-    log(`linear: flushed ${pending.length} held message(s) into lane ${laneKey}`);
-    return pending.length;
+    const held = lanes.get(laneKey)?.pending?.length ?? 0;
+    if (!held) return 0;
+    if ((await deliver(laneKey)) !== "sent") return 0;
+    log(`linear: flushed ${held} held message(s) into lane ${laneKey}`);
+    return held;
+  }
+
+  /** A lane that never registers must not swallow messages silently. */
+  function watchBoot(key: string, launchedAt: number) {
+    setTimeout(() => {
+      const lane = lanes.get(key);
+      if (!lane || lane.registeredAt || lane.launchedAt !== launchedAt) return;
+      const held = lane.pending?.length ?? 0;
+      log(`linear: lane ${key} never registered (${held} message(s) held)`);
+      const body = `The lane \`${lane.name}\` never came up on the laptop (Claude did not start within ${Math.round(bootGraceMs / 60_000)} minutes).${held ? ` ${held} message(s) were not delivered.` : ""} Reply here to start it again.`;
+      for (const id of lane.sessions) void postActivity(client, id, { type: "error", body }).catch((err) => log(`linear: boot failure report failed: ${err}`));
+    }, bootGraceMs).unref();
   }
 
   const repoFor = (teamKey: string, projectName?: string) =>
@@ -108,10 +130,19 @@ export function createLinearHandler(deps: HandlerDeps): LinearHandler {
       throw new Error(`${running} lanes already running (limit ${linear.maxLanes}) — close one or retry later`);
     }
     // Recorded before the launch so a second event for the same lane routes instead of launching again.
+    const previous = lanes.get(lane.key);
     lanes.set(lane);
-    const launched = await launch({ repo: lane.repo, branch: lane.branch, prompt });
-    lanes.set({ ...lanes.get(lane.key)!, cwd: launched.cwd, paneId: launched.paneId });
-    log(`linear: lane ${lane.key} launched in ${launched.cwd}`);
+    try {
+      const launched = await launch({ repo: lane.repo, branch: lane.branch, prompt });
+      lanes.set({ ...lanes.get(lane.key)!, cwd: launched.cwd, paneId: launched.paneId });
+      log(`linear: lane ${lane.key} launched in ${launched.cwd}`);
+    } catch (err) {
+      // A record left behind would hold every message for the boot grace instead of retrying.
+      if (previous) lanes.set({ ...previous, sessions: lane.sessions, pending: lanes.get(lane.key)?.pending });
+      else lanes.delete(lane.key);
+      throw err;
+    }
+    watchBoot(lane.key, lane.launchedAt);
   }
 
   async function routeSession(sessionId: string, issueId: string, request: string) {
@@ -122,7 +153,7 @@ export function createLinearHandler(deps: HandlerDeps): LinearHandler {
 
     if (existing) {
       lanes.set({ ...existing, sessions: [...new Set([...existing.sessions, sessionId])] });
-      const outcome = await deliver(lanes.get(key)!, `${tag} ${oneLine(issue.title, 120)} — ${oneLine(request)}`);
+      const outcome = await deliver(key, `${tag} ${oneLine(issue.title, 120)} — ${oneLine(request)}`);
       if (outcome !== "gone") {
         const body = outcome === "sent" ? `Sent to the running lane \`${existing.name}\`.` : `The lane \`${existing.name}\` is still starting — your message is held and will be delivered when it is up.`;
         await postActivity(client, sessionId, { type: "thought", body });
@@ -152,7 +183,7 @@ export function createLinearHandler(deps: HandlerDeps): LinearHandler {
       branch: `${slug(issue.project?.name ?? `${issue.identifier}-${issue.title}`)}-${Date.now().toString(36).slice(-4)}`,
       sessions: [...new Set([...(existing?.sessions ?? []), sessionId])],
       launchedAt: Date.now(),
-      pending: existing?.pending,
+      pending: lanes.get(key)?.pending,
     };
     const scope = issue.project ? `project "${oneLine(issue.project.name, 80)}" (id ${issue.project.id})` : "single issue";
     try {
@@ -182,7 +213,7 @@ export function createLinearHandler(deps: HandlerDeps): LinearHandler {
       const lane = lanes.bySession(session.id);
       if (lane) {
         const text = activity?.signal === "stop" ? "STOP requested by the user — stop what you are doing and say where things stand." : oneLine(body, 2000);
-        const outcome = await deliver(lane, `[linear follow-up session:${session.id}] ${text}`);
+        const outcome = await deliver(lane.key, `[linear follow-up session:${session.id}] ${text}`);
         if (outcome === "queued") {
           await postActivity(client, session.id, { type: "thought", body: "The lane is still starting — your message is held and will be delivered when it is up." });
         }

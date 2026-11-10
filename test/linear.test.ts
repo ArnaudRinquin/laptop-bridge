@@ -75,7 +75,11 @@ test("oauth callback refuses an unknown state", async () => {
   expect(res.status).toBe(400);
 });
 
-function harness(issues: Record<string, { identifier: string; title: string; project?: { id: string; name: string; slugId: string } }>) {
+function harness(
+  issues: Record<string, { identifier: string; title: string; project?: { id: string; name: string; slugId: string } }>,
+  opts: { bootGraceMs?: number; failLaunches?: number } = {},
+) {
+  let failLaunches = opts.failLaunches ?? 0;
   const calls: { launches: { repo: string; prompt: string }[]; injected: string[]; activities: { session: string; type: string }[] } = {
     launches: [],
     injected: [],
@@ -110,7 +114,9 @@ function harness(issues: Record<string, { identifier: string; title: string; pro
     linear: LINEAR,
     client,
     lanes,
+    bootGraceMs: opts.bootGraceMs,
     launch: async ({ repo, prompt }) => {
+      if (failLaunches-- > 0) throw new Error("orca is down");
       calls.launches.push({ repo, prompt });
       const cwd = `/wt/${calls.launches.length}`;
       panes.push({ id: `term_${calls.launches.length}`, path: cwd, command: "claude", mux: "orca" });
@@ -208,4 +214,40 @@ test("messages sent while the lane boots are held, then typed in on registration
   expect(await h.register("p-abc123")).toBe(2);
   expect(h.calls.injected).toEqual(["[linear follow-up session:s1] one more thing", "[linear session:s2 issue:RBD-7] B — do B"]);
   expect(h.lanes.get("p-abc123")?.pending).toEqual([]);
+});
+
+test("a failed launch leaves no lane behind: the next message retries", async () => {
+  const h = harness({ i1: { identifier: "RBD-5", title: "First try" } }, { failLaunches: 1 });
+  await expect(h.session("created", "s1", "i1", "go")).rejects.toThrow("orca is down");
+  expect(h.lanes.get("RBD-5")).toBeUndefined();
+  expect(h.calls.activities.at(-1)).toEqual({ session: "s1", type: "error" });
+  await h.session("prompted", "s1", "i1", "again");
+  expect(h.calls.launches).toHaveLength(1);
+});
+
+test("a lane whose Claude terminal closed is gone, even if another tab lives in the worktree", async () => {
+  const h = harness({ i1: { identifier: "RBD-5", title: "First try" } });
+  await h.session("created", "s1", "i1", "go");
+  await h.register("RBD-5");
+  h.panes.length = 0;
+  h.panes.push({ id: "term_dev", path: "/wt/1", command: "dev", mux: "orca" });
+  await h.session("prompted", "s1", "i1", "still there?");
+  expect(h.calls.injected).toHaveLength(0);
+  expect(h.calls.launches).toHaveLength(2);
+  // the message that found the lane gone rides in the relaunch prompt, not typed a second time
+  expect(h.calls.launches[1]!.prompt).toContain("still there?");
+  expect(await h.register("RBD-5")).toBe(0);
+  expect(h.calls.injected).toHaveLength(0);
+});
+
+test("a lane that never registers reports the failure and delivers held messages once a session is live", async () => {
+  const h = harness({ i1: { identifier: "RBD-5", title: "First try" } }, { bootGraceMs: 40 });
+  await h.session("created", "s1", "i1", "go");
+  await h.session("prompted", "s1", "i1", "held");
+  expect(h.calls.injected).toHaveLength(0);
+  await new Promise((r) => setTimeout(r, 80));
+  expect(h.calls.activities.at(-1)).toEqual({ session: "s1", type: "error" });
+  // grace over, Claude terminal is there after all: the next message goes through, held one first
+  await h.session("prompted", "s1", "i1", "now");
+  expect(h.calls.injected).toEqual(["[linear follow-up session:s1] held", "[linear follow-up session:s1] now"]);
 });
