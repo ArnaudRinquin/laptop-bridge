@@ -38,10 +38,6 @@ export interface Config {
   allowedUserIds: string[];
   /** tmux binary (absolute — the SwiftBar env has a minimal PATH). */
   tmuxBin: string;
-  /** herdr binary (absolute — same reason). */
-  herdrBin: string;
-  /** herdr control socket. The CLI derives it from $HOME, which the bridge can't count on. */
-  herdrSocket: string;
   /**
    * Orca CLI inside the app bundle. Not /usr/local/bin/orca: that symlink is
    * root-owned mode 0700, and the CLI fails to resolve Orca.app through it.
@@ -74,8 +70,6 @@ export function loadConfig(): Config {
       ? j.allowedUserIds.filter((x: unknown): x is string => typeof x === "string")
       : [],
     tmuxBin: j.tmuxBin ?? "/opt/homebrew/bin/tmux",
-    herdrBin: j.herdrBin ?? "/opt/homebrew/bin/herdr",
-    herdrSocket: j.herdrSocket ?? join(homedir(), ".config", "herdr", "herdr.sock"),
     orcaBin: j.orcaBin ?? "/Applications/Orca.app/Contents/Resources/bin/orca",
   };
 }

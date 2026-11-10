@@ -8,7 +8,5 @@
   "jobCommand": null,
   "jobCwd": "/Users/arnaud/projects",
   "orcaBin": "/Applications/Orca.app/Contents/Resources/bin/orca",
-  "herdrBin": "/opt/homebrew/bin/herdr",
-  "herdrSocket": "/Users/arnaud/.config/herdr/herdr.sock",
   "tmuxBin": "/opt/homebrew/bin/tmux"
 }

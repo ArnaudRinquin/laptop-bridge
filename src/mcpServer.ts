@@ -35,7 +35,7 @@ function buildServer(ops: StreamOps, jobs: JobsIndex, ext?: HttpExtensions): Mcp
           .string()
           .optional()
           .describe(
-            "$ORCA_TERMINAL_HANDLE (e.g. term_6ea8…), else $HERDR_PANE_ID (e.g. w7:p2), else $TMUX_PANE (e.g. %42)",
+            "$ORCA_TERMINAL_HANDLE (e.g. term_6ea8…), else $TMUX_PANE (e.g. %42)",
           ),
         pid: z.number().optional().describe("Your process pid"),
         branch: z.string().optional().describe("Git branch, if known"),
