@@ -6,7 +6,7 @@ import type { JobRecord } from "./jobs";
 
 const exec = promisify(execFile);
 
-export type Mux = "tmux" | "herdr";
+export type Mux = "tmux" | "herdr" | "orca";
 
 export interface Pane {
   id: string;
@@ -20,10 +20,11 @@ export interface Pane {
 /**
  * Pick the pane hosting the job's Claude session. Registration gives us the
  * pane id, but ids are not a reliable handle on their own — tmux recycles them
- * after close, herdr re-issues them on `pane move` — so a pane only counts if
+ * after close, herdr re-issues them on `pane move`, Orca's go stale on an app
+ * restart — so a pane only counts if
  * it currently sits in the job's worktree. Among path matches, prefer the
- * registered id, then a pane that looks like a Claude process (herdr labels it
- * "claude"; the tmux-visible claude CLI shows up as its version number, e.g.
+ * registered id, then a pane that looks like a Claude process (herdr and Orca
+ * label it "claude"; the tmux-visible claude CLI shows up as its version number, e.g.
  * "2.1.211", or as node/claude).
  */
 export function findPane(panes: Pane[], job: JobRecord): Pane | undefined {
@@ -38,13 +39,17 @@ export function findPane(panes: Pane[], job: JobRecord): Pane | undefined {
 }
 
 /**
- * Every pane of every multiplexer, merged. Jobs launched before the herdr
- * migration still live in tmux, so neither list is authoritative — and a dead
- * multiplexer (no tmux server, herdr not running) must not hide the other's
- * panes, hence allSettled.
+ * Every pane of every multiplexer, merged. Jobs launched before the Orca
+ * migration still live in herdr (or tmux), so no list is authoritative — and a
+ * dead multiplexer (no tmux server, herdr or Orca not running) must not hide
+ * the others' panes, hence allSettled.
  */
 export async function listPanes(config: Config): Promise<Pane[]> {
-  const results = await Promise.allSettled([listTmuxPanes(config), listHerdrPanes(config)]);
+  const results = await Promise.allSettled([
+    listTmuxPanes(config),
+    listHerdrPanes(config),
+    listOrcaPanes(config),
+  ]);
   const panes: Pane[] = [];
   for (const r of results) {
     if (r.status === "fulfilled") panes.push(...r.value);
@@ -90,6 +95,24 @@ async function listHerdrPanes(config: Config): Promise<Pane[]> {
   }));
 }
 
+interface OrcaTerminal {
+  handle?: string;
+  worktreePath?: string;
+  agentIdentity?: string;
+  title?: string;
+}
+
+async function listOrcaPanes(config: Config): Promise<Pane[]> {
+  const { stdout } = await exec(config.orcaBin, ["terminal", "list", "--json"]);
+  const parsed = JSON.parse(stdout) as { ok?: boolean; result?: { terminals?: OrcaTerminal[] } };
+  return (parsed.result?.terminals ?? []).map((t) => ({
+    id: t.handle ?? "",
+    path: t.worktreePath ?? "",
+    command: t.agentIdentity ?? t.title ?? "",
+    mux: "orca" as const,
+  }));
+}
+
 /**
  * Type text into the pane's Claude session, exactly like a human would.
  * Newlines are collapsed (a raw newline would submit prematurely).
@@ -100,7 +123,9 @@ async function listHerdrPanes(config: Config): Promise<Pane[]> {
  */
 export async function injectText(config: Config, pane: Pane, text: string) {
   const oneLine = text.replace(/\s*\n+\s*/g, " ").trim();
-  if (pane.mux === "herdr") {
+  if (pane.mux === "orca") {
+    await exec(config.orcaBin, ["terminal", "send", "--terminal", pane.id, "--text", oneLine, "--enter", "--json"]);
+  } else if (pane.mux === "herdr") {
     await exec(config.herdrBin, ["pane", "send-text", pane.id, oneLine], { env: herdrEnv(config) });
     await exec(config.herdrBin, ["pane", "send-keys", pane.id, "enter"], { env: herdrEnv(config) });
   } else {

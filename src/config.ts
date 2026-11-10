@@ -24,6 +24,11 @@ export interface Config {
   herdrBin: string;
   /** herdr control socket. The CLI derives it from $HOME, which the bridge can't count on. */
   herdrSocket: string;
+  /**
+   * Orca CLI inside the app bundle. Not /usr/local/bin/orca: that symlink is
+   * root-owned mode 0700, and the CLI fails to resolve Orca.app through it.
+   */
+  orcaBin: string;
 }
 
 export const CONFIG_PATH = join(homedir(), ".config", "slack-trigger", "config.json");
@@ -52,5 +57,6 @@ export function loadConfig(): Config {
     tmuxBin: j.tmuxBin ?? "/opt/homebrew/bin/tmux",
     herdrBin: j.herdrBin ?? "/opt/homebrew/bin/herdr",
     herdrSocket: j.herdrSocket ?? join(homedir(), ".config", "herdr", "herdr.sock"),
+    orcaBin: j.orcaBin ?? "/Applications/Orca.app/Contents/Resources/bin/orca",
   };
 }
