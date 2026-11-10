@@ -13,7 +13,16 @@ const fail = (err: unknown) => ({
   content: [{ type: "text" as const, text: err instanceof Error ? err.message : String(err) }],
 });
 
-function buildServer(ops: StreamOps, jobs: JobsIndex): McpServer {
+export interface HttpExtensions {
+  /** Routes that need the raw body (webhooks) — mounted before express.json(). */
+  mountBeforeJson?: (app: express.Express) => void;
+  /** Path prefix reachable from outside (through a tunnel); exempt from the local-Host check. */
+  publicPrefix?: string;
+  /** Extra MCP tools served on the same /mcp endpoint. */
+  registerTools?: (server: McpServer) => void;
+}
+
+function buildServer(ops: StreamOps, jobs: JobsIndex, ext?: HttpExtensions): McpServer {
   const server = new McpServer({ name: "slack-stream", version: "0.1.0" });
 
   server.registerTool(
@@ -27,7 +36,9 @@ function buildServer(ops: StreamOps, jobs: JobsIndex): McpServer {
         paneId: z
           .string()
           .optional()
-          .describe("$HERDR_PANE_ID (e.g. w7:p2), or $TMUX_PANE (e.g. %42) on the tmux fallback"),
+          .describe(
+            "$ORCA_TERMINAL_HANDLE (e.g. term_6ea8…), else $TMUX_PANE (e.g. %42)",
+          ),
         pid: z.number().optional().describe("Your process pid"),
         branch: z.string().optional().describe("Git branch, if known"),
       },
@@ -124,20 +135,38 @@ function buildServer(ops: StreamOps, jobs: JobsIndex): McpServer {
     },
   );
 
+  ext?.registerTools?.(server);
   return server;
 }
 
 const slug = (s: string) =>
   s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "step";
 
-export function startMcpHttp(port: number, ops: StreamOps, registry: Registry, jobs: JobsIndex) {
+export function startMcpHttp(
+  port: number,
+  ops: StreamOps,
+  registry: Registry,
+  jobs: JobsIndex,
+  ext?: HttpExtensions,
+) {
   const app = express();
+  // The MCP endpoint is unauthenticated and local. A web page can reach
+  // 127.0.0.1 through DNS rebinding, but only with its own hostname in Host:
+  // anything not addressed to this machine by a local name is refused. Paths
+  // a tunnel forwards on purpose (ext.publicPrefix) authenticate themselves.
+  const localHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`]);
+  app.use((req, res, next) => {
+    if (ext?.publicPrefix && (req.path === ext.publicPrefix || req.path.startsWith(`${ext.publicPrefix}/`))) return next();
+    if (localHosts.has((req.headers.host ?? "").toLowerCase())) return next();
+    res.status(403).json({ error: "forbidden host" });
+  });
+  ext?.mountBeforeJson?.(app);
   app.use(express.json());
 
   // Stateless transport: fresh server+transport per request, no session bookkeeping.
   // All state lives in the shared registry, keyed by threadTs.
   app.post("/mcp", async (req, res) => {
-    const server = buildServer(ops, jobs);
+    const server = buildServer(ops, jobs, ext);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => {
       void transport.close();

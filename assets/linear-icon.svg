@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" fill="#1e1e2e"/>
+<rect x="112" y="128" width="288" height="200" rx="20" fill="#181825" stroke="#cdd6f4" stroke-width="22"/>
+<path d="M68 366h376a32 32 0 0 1-32 32H100a32 32 0 0 1-32-32z" fill="#cdd6f4"/>
+<text x="176" y="284" font-family="Menlo, ui-monospace, monospace" font-weight="700" font-size="150" fill="#cdd6f4">a</text>
+<rect x="276" y="176" width="52" height="110" fill="#cba6f7"/></svg>

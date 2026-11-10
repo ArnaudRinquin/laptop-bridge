@@ -7,7 +7,6 @@
   "allowedUserIds": [],
   "jobCommand": null,
   "jobCwd": "/Users/arnaud/projects",
-  "herdrBin": "/opt/homebrew/bin/herdr",
-  "herdrSocket": "/Users/arnaud/.config/herdr/herdr.sock",
+  "orcaBin": "/Applications/Orca.app/Contents/Resources/bin/orca",
   "tmuxBin": "/opt/homebrew/bin/tmux"
 }

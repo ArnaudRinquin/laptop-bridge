@@ -27,7 +27,8 @@ rebuild in an afternoon.
 | Bot scopes `app_mentions:read`, `chat:write`, `assistant:write`; event `app_mention` | Listen + write |
 | App-level token, scope `connections:write` | Socket Mode |
 | Claude Code (or any MCP-capable agent) | Does the work; calls the MCP tools |
-| A job launcher (here: `wt`/worktrunk + herdr terminal multiplexer, tmux as legacy) | Creates worktree + starts the agent in a pane |
+| A job launcher (here: Orca worktrees, tmux as legacy) | Creates worktree + starts the agent in a terminal |
+| Optional second front door: a Linear OAuth app (`actor=app`) + a tunnel for one path | Start and steer work from issues and projects |
 | SwiftBar (optional, macOS) | Menubar status + process lifecycle |
 
 Secrets / config (file `~/.config/slack-trigger/config.json`, shape in
@@ -36,7 +37,9 @@ Secrets / config (file `~/.config/slack-trigger/config.json`, shape in
 - `botToken` (`xoxb-…`), `appToken` (`xapp-…`) — validated by prefix in `src/config.ts`.
 - `port` (default 8365), `taskDisplayMode` (`timeline`|`plan`), `staleStreamMinutes` (60),
   `allowedUserIds` (empty = anyone), `jobCommand` (null = smoke demo), `jobCwd`,
-  `herdrBin`, `herdrSocket`, `tmuxBin` (absolute paths — see gotchas).
+  `orcaBin`, `tmuxBin` (absolute paths — see gotchas).
+- Optional `linear` block: `clientId`, `clientSecret`, `webhookSecret`, `publicUrl`,
+  `triggerStatus`, `teamRepos`, `projectRepos`, `maxLanes`, `allowedUserIds`.
 
 Env passed to each job: `SLACK_THREAD_TS`, `SLACK_CHANNEL`, `SLACK_PROMPT`,
 `SLACK_EVENT_TS`, `SLACK_MCP_URL`.
@@ -151,21 +154,21 @@ All "measured" items come from commit messages / README; none are in Slack docs.
   Sweep (`kill`) marks spinning steps ❌ and folds a timeout note into the message.
 - Every Slack write has a fallback chain ending in plain `chat.postMessage`.
 
-**Follow-ups & multiplexers**
-- Pane ids are not a handle: tmux recycles them, herdr re-issues them on `pane move`.
-  Ground truth = pane cwd (or foreground cwd) equals the registered worktree.
-- List tmux and herdr with `allSettled`; a dead mux must not hide the other's panes.
-- `herdr agent prompt` doesn't deliver (and reports success without `--wait`);
-  use `pane send-text` + `send-keys enter`. Collapse newlines before typing (a raw
-  newline submits early).
-- Pane pick among cwd matches: registered id, else something that looks like
-  Claude (herdr labels it `"agent": "claude"`; in tmux the claude CLI shows up
-  as its version number, e.g. `2.1.x`, or `node`/`claude`), else first match.
+**Follow-ups & terminals**
+- Terminal ids are not a handle: tmux recycles pane ids, Orca's handles go stale on
+  an app restart. Ground truth = the terminal's cwd equals the registered worktree.
+- List tmux and Orca with `allSettled`; a dead one must not hide the other's panes.
+  No tmux server is the normal state, not a failure worth logging.
+- Type with `orca terminal send --text … --enter` (or `tmux send-keys -l` + `Enter`).
+  Collapse newlines before typing (a raw newline submits early).
+- Use the Orca CLI inside the app bundle; the `/usr/local/bin/orca` symlink is
+  root-owned 0700 and can't resolve the app.
+- Pick among cwd matches: registered id, else something that looks like Claude
+  (Orca reports `agentIdentity: "claude"`; in tmux the claude CLI shows up as its
+  version number, e.g. `2.1.x`, or `node`/`claude`), else first match.
 - Mid-work, an injected follow-up is a steering message; after `finish` it's a
   new turn with full context. If no stream is live, one is reopened first
   ("Reconnecting to session…"); if the pane is gone, a fresh job is spawned with a note.
-- herdr CLI finds its socket via `$HOME`; pass `HERDR_SOCKET_PATH` explicitly.
-  `herdr status server` always exits 0 — parse its output.
 
 **Spawning**
 - Spawn via `zsh -ilc`, not `-lc`: PATH managers (fnm/nvm/mise) load from
@@ -174,8 +177,46 @@ All "measured" items come from commit messages / README; none are in Slack docs.
   call `fnm use` explicitly.
 - Base worktrees on `origin/<default>`, not the local default branch (stale →
   jobs started N commits behind).
-- Pipe and log launcher output even on exit 0 (the herdr layout script exits 0
-  on its worst failures); listen on `exit`, not `close`.
+- Pipe and log launcher output even on exit 0 (a launcher can exit 0 with no
+  agent started); listen on `exit`, not `close`.
+- A repo with `setupAgentStartupPolicy: wait-for-setup` makes Orca drop `--prompt`
+  (`launch.prompt.outcome: "not-delivered"`): wait until Orca reports Claude in
+  that terminal AND its input line shows, then type the prompt once.
+
+**A second front door (Linear)** — all measured
+- Reuse everything above; add only the edge: a verified webhook instead of a
+  socket, its own correlation tokens (lane key + agent session id), its own
+  report-back tools on the same MCP server.
+- Decide the *unit of work* before wiring triggers. Here a project is one
+  long-lived session (a lane) and its issues are messages to it, so a second
+  issue types into a running terminal instead of opening a second worktree.
+- Linear only delivers by HTTPS POST: tunnel ONE path (`tailscale funnel
+  --set-path /linear`) and treat everything under it as hostile until the HMAC
+  over the RAW body checks out (mount the route before any JSON body parser).
+  Reply 200 within 5 s, work after the ack; first agent activity within 10 s.
+- Everything not under that path is local: refuse any `Host` that is not a local
+  name, or a web page can reach the MCP endpoint through DNS rebinding.
+- An agent app cannot edit a team's workflow or create team-scoped labels
+  ("not allowed to take action"); workspace labels, issues, projects, project
+  updates and external links work. Initiatives need `initiative:read/write`.
+- Created straight in a status = a `create` event with no `updatedFrom`; moved
+  into it = `update` with `updatedFrom.stateId` (issues) / `statusId` (projects).
+  Handle both or "create it already In Progress" does nothing.
+- The app's own writes come back as webhooks: act only when `actor.type` is
+  `user`. A session the app opens itself (`agentSessionCreateOnIssue`) is echoed
+  back as `created`: remember its id and drop the echo.
+- Text from Linear gets typed into a terminal: only into one the multiplexer
+  reports as running the agent (after Claude exits, the same terminal is a
+  shell), on one line, control bytes stripped, look-alike bridge tags defused.
+- "Can't list terminals" is not "the session is gone": a busy multiplexer must
+  produce a retryable error, never a second worktree.
+- Messages that arrive while a lane boots are held and typed in when it
+  registers; drop each from the queue only once typed.
+- Linear accepts `http://127.0.0.1:…` as a session external URL and a project
+  link: a localhost route that runs `orca worktree activate` makes "Open in Orca".
+  A page opened that way can `window.close()` itself (not in Firefox).
+- Access tokens last 24 h and the refresh token rotates: one process owns the
+  token; other sessions call that process (`scripts/linear.ts`), never the API.
 
 **SwiftBar**
 - `~~~` must *lead* each streamable block; trailing it leaves the item empty.
@@ -197,7 +238,7 @@ its worktree and exit.
 
 - **Launcher**: replace `scripts/launch-job.zsh` with docker / ssh / CI / plain
   `claude -p` — only contract is the `SLACK_*` env and `threadTs` in the prompt.
-- **Follow-up injection**: `src/inject.ts` is the only multiplexer-specific code;
+- **Follow-up injection**: `src/inject.ts` is the only terminal-specific code;
   swap for your terminal (or drop follow-ups).
 - **Agent**: anything that speaks MCP over HTTP; keep the 5-tool protocol.
 - **Status UI**: drop SwiftBar; poll `/healthz` from anything.

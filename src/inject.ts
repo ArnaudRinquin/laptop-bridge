@@ -6,7 +6,7 @@ import type { JobRecord } from "./jobs";
 
 const exec = promisify(execFile);
 
-export type Mux = "tmux" | "herdr";
+export type Mux = "tmux" | "orca";
 
 export interface Pane {
   id: string;
@@ -14,15 +14,17 @@ export interface Pane {
   /** cwd of the pane's foreground process — diverges from `path` while a command runs. */
   foregroundPath?: string;
   command: string;
+  /** Agent the multiplexer recognises as running there ("claude"); unset for a plain shell. */
+  agent?: string;
   mux: Mux;
 }
 
 /**
  * Pick the pane hosting the job's Claude session. Registration gives us the
  * pane id, but ids are not a reliable handle on their own — tmux recycles them
- * after close, herdr re-issues them on `pane move` — so a pane only counts if
- * it currently sits in the job's worktree. Among path matches, prefer the
- * registered id, then a pane that looks like a Claude process (herdr labels it
+ * after close, Orca's go stale on an app restart — so a pane only counts if it
+ * currently sits in the job's worktree. Among path matches, prefer the
+ * registered id, then a pane that looks like a Claude process (Orca labels it
  * "claude"; the tmux-visible claude CLI shows up as its version number, e.g.
  * "2.1.211", or as node/claude).
  */
@@ -38,13 +40,12 @@ export function findPane(panes: Pane[], job: JobRecord): Pane | undefined {
 }
 
 /**
- * Every pane of every multiplexer, merged. Jobs launched before the herdr
- * migration still live in tmux, so neither list is authoritative — and a dead
- * multiplexer (no tmux server, herdr not running) must not hide the other's
- * panes, hence allSettled.
+ * Every pane of every multiplexer, merged. Jobs launched before the Orca
+ * migration may still live in tmux, so no list is authoritative — and a dead
+ * one (no tmux server, Orca not running) must not hide the other's panes.
  */
 export async function listPanes(config: Config): Promise<Pane[]> {
-  const results = await Promise.allSettled([listTmuxPanes(config), listHerdrPanes(config)]);
+  const results = await Promise.allSettled([listTmuxPanes(config), listOrcaPanes(config)]);
   const panes: Pane[] = [];
   for (const r of results) {
     if (r.status === "fulfilled") panes.push(...r.value);
@@ -54,12 +55,19 @@ export async function listPanes(config: Config): Promise<Pane[]> {
 }
 
 async function listTmuxPanes(config: Config): Promise<Pane[]> {
-  const { stdout } = await exec(config.tmuxBin, [
-    "list-panes",
-    "-a",
-    "-F",
-    "#{pane_id}\t#{pane_current_path}\t#{pane_current_command}",
-  ]);
+  let stdout: string;
+  try {
+    ({ stdout } = await exec(config.tmuxBin, [
+      "list-panes",
+      "-a",
+      "-F",
+      "#{pane_id}\t#{pane_current_path}\t#{pane_current_command}",
+    ]));
+  } catch (err) {
+    // No tmux server (or no tmux at all) is the normal state now: no panes, not a failure.
+    if (/no server running|error connecting|ENOENT/.test(String(err))) return [];
+    throw err;
+  }
   return stdout
     .split("\n")
     .filter(Boolean)
@@ -69,51 +77,42 @@ async function listTmuxPanes(config: Config): Promise<Pane[]> {
     });
 }
 
-interface HerdrPane {
-  pane_id?: string;
-  cwd?: string;
-  foreground_cwd?: string;
-  agent?: string;
-  terminal_title_stripped?: string;
+interface OrcaTerminal {
+  handle?: string;
+  worktreePath?: string;
+  agentIdentity?: string;
+  title?: string;
 }
 
-async function listHerdrPanes(config: Config): Promise<Pane[]> {
-  const { stdout } = await exec(config.herdrBin, ["pane", "list"], { env: herdrEnv(config) });
-  const parsed = JSON.parse(stdout) as { result?: { panes?: HerdrPane[] } };
-  return (parsed.result?.panes ?? []).map((p) => ({
-    id: p.pane_id ?? "",
-    path: p.cwd ?? "",
-    foregroundPath: p.foreground_cwd,
-    // herdr names the recognised agent outright — no command-name guessing needed.
-    command: p.agent ?? p.terminal_title_stripped ?? "",
-    mux: "herdr" as const,
+/**
+ * Throws when Orca can't answer or the list is cut short: callers that decide
+ * "this session is gone" from the list must not mistake a busy Orca for it.
+ */
+export async function listOrcaPanes(config: Config): Promise<Pane[]> {
+  const { stdout } = await exec(config.orcaBin, ["terminal", "list", "--json"], { timeout: 20_000, maxBuffer: 16 * 1024 * 1024 });
+  const parsed = JSON.parse(stdout) as { ok?: boolean; result?: { terminals?: OrcaTerminal[]; truncated?: boolean } };
+  if (!parsed.ok || !parsed.result?.terminals) throw new Error("orca terminal list returned no terminals field");
+  if (parsed.result.truncated) throw new Error("orca terminal list was truncated");
+  return parsed.result.terminals.map((t) => ({
+    id: t.handle ?? "",
+    path: t.worktreePath ?? "",
+    command: t.agentIdentity ?? t.title ?? "",
+    agent: t.agentIdentity ?? undefined,
+    mux: "orca" as const,
   }));
 }
 
 /**
  * Type text into the pane's Claude session, exactly like a human would.
  * Newlines are collapsed (a raw newline would submit prematurely).
- *
- * herdr uses `pane send-text` + an `enter` key rather than `agent prompt`:
- * the agent surface does not deliver here — the text never reaches Claude's
- * input box and, without --wait, it reports success anyway.
  */
 export async function injectText(config: Config, pane: Pane, text: string) {
   const oneLine = text.replace(/\s*\n+\s*/g, " ").trim();
-  if (pane.mux === "herdr") {
-    await exec(config.herdrBin, ["pane", "send-text", pane.id, oneLine], { env: herdrEnv(config) });
-    await exec(config.herdrBin, ["pane", "send-keys", pane.id, "enter"], { env: herdrEnv(config) });
+  if (pane.mux === "orca") {
+    await exec(config.orcaBin, ["terminal", "send", "--terminal", pane.id, "--text", oneLine, "--enter", "--json"], { timeout: 30_000 });
   } else {
     await exec(config.tmuxBin, ["send-keys", "-t", pane.id, "-l", "--", oneLine]);
     await exec(config.tmuxBin, ["send-keys", "-t", pane.id, "Enter"]);
   }
   log(`inject: sent ${oneLine.length} chars to ${pane.mux} pane ${pane.id}`);
-}
-
-/**
- * The herdr CLI resolves its socket from $HOME, which the SwiftBar-launched
- * bridge cannot be assumed to have — pass the path outright.
- */
-function herdrEnv(config: Config) {
-  return { ...process.env, HERDR_SOCKET_PATH: config.herdrSocket };
 }

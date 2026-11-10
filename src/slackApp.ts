@@ -186,9 +186,8 @@ function spawnJob(
   child.on("exit", (code, signal) => {
     const why = signal ? `signal ${signal}` : `exit ${code}`;
     const tail = output.trim().slice(-1200);
-    // Logged even on success: herdr-layout.local deliberately exits 0 on its
-    // worst cases (agent_name_taken, a failed agent start, claude never idle),
-    // so a worktree with no claude in it looks like a clean launch from here.
+    // Logged even on success: a launcher can exit 0 with no agent started, so
+    // its output is the only trace of what the worktree actually got.
     if (tail) log(`job launcher output (${why}) thread=${job.threadTs}: ${tail}`);
     if (code === 0) return;
     log(`job launcher failed (${why}) thread=${job.threadTs}`);
