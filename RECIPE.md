@@ -1,4 +1,4 @@
-# RECIPE — build your own slack-to-laptop
+# RECIPE — build your own laptop-bridge
 
 How this project is built and how to make your own. Written for an AI coding
 agent handed this file and told "build me one of these". For running *this*
@@ -80,7 +80,7 @@ Storage: `~/.cache/slack-to-laptop/registry.json` (live streams + replay log),
 
 Key files: `server.ts`, `src/slackApp.ts`, `src/streams.ts`, `src/mcpServer.ts`,
 `src/registry.ts`, `src/jobs.ts`, `src/inject.ts`, `src/config.ts`, `src/log.ts`,
-`src/swiftbar.ts`, `scripts/launch-job.zsh`, `swiftbar/slack-to-laptop.sh`,
+`src/swiftbar.ts`, `scripts/launch-job.zsh`, `swiftbar/laptop-bridge.sh`,
 `test/mcp.test.ts` (fake Slack client mirroring measured API behavior).
 
 ## Build-your-own steps
@@ -104,13 +104,13 @@ Key files: `server.ts`, `src/slackApp.ts`, `src/streams.ts`, `src/mcpServer.ts`,
 9. Job launcher: write your own `jobCommand` script (reference
    `scripts/launch-job.zsh`; it is machine-specific). It must create a worktree,
    start the agent with the `threadTs` inside the prompt, and exit non-zero on failure.
-10. `claude mcp add --transport http --scope user slack-stream http://127.0.0.1:8365/mcp`.
+10. `claude mcp add --transport http --scope user laptop http://127.0.0.1:8365/mcp`.
 11. Job-side skill (e.g. `~/.claude/skills/slack-ta/`, not in this repo): parse
     `threadTs` from the prompt, `register_job` first, `thinking_step` at real
     milestones, `finish(markdown)` ALWAYS (also on failure). No token → work
     without streaming; "no live stream" error → keep working, stop streaming.
 12. Follow-ups: `jobs.json` + `src/inject.ts` (list panes, verify cwd, type text).
-13. Optional: SwiftBar plugin `swiftbar/slack-to-laptop.sh` (`--swiftbar` flag).
+13. Optional: SwiftBar plugin `swiftbar/laptop-bridge.sh` (`--swiftbar` flag).
 14. Tests: `bun test` against a fake `WebClient` (see `test/mcp.test.ts`).
 
 ## Design decisions & gotchas
@@ -225,7 +225,7 @@ All "measured" items come from commit messages / README; none are in Slack docs.
 - Use `process.stdout.write` (piped `console.log` is block-buffered); absolute
   binary paths (GUI PATH is minimal).
 - SwiftBar doesn't respawn a dead process; refresh via
-  `open -g "swiftbar://refreshplugin?name=slack-to-laptop"`.
+  `open -g "swiftbar://refreshplugin?name=laptop-bridge"`.
 
 **Naming quirk**: config dir is `~/.config/slack-trigger/`, cache dir is
 `~/.cache/slack-to-laptop/`.

@@ -1,5 +1,5 @@
 {
-  "name": "slack-to-laptop",
+  "name": "laptop-bridge",
   "module": "server.ts",
   "type": "module",
   "private": true,

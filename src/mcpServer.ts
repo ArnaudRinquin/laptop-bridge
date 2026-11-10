@@ -23,7 +23,7 @@ export interface HttpExtensions {
 }
 
 function buildServer(ops: StreamOps, jobs: JobsIndex, ext?: HttpExtensions): McpServer {
-  const server = new McpServer({ name: "slack-stream", version: "0.1.0" });
+  const server = new McpServer({ name: "laptop", version: "0.1.0" });
 
   server.registerTool(
     "register_job",

@@ -134,7 +134,7 @@ test("initialize + tools/list exposes the 5 tools", async () => {
     method: "initialize",
     params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } },
   });
-  expect(init.result.serverInfo.name).toBe("slack-stream");
+  expect(init.result.serverInfo.name).toBe("laptop");
 
   const list = await rpc({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
   const names = list.result.tools.map((t: { name: string }) => t.name).sort();

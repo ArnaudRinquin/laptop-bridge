@@ -1,4 +1,6 @@
-# slack-to-laptop
+# laptop-bridge
+
+Formerly `slack-to-laptop`.
 
 One long-lived local process that turns a message into work on this laptop, and
 reports back where the message came from. Two front doors, one back room:
@@ -60,16 +62,16 @@ Set `jobCommand` in the config — a zsh command run per mention with env:
 | `SLACK_EVENT_TS` | unique per mention — use for the worktree name |
 | `SLACK_MCP_URL` | `http://127.0.0.1:8365/mcp` |
 
-Example: `"jobCommand": "/Users/you/projects/slack-to-laptop/scripts/launch-job.zsh"` —
+Example: `"jobCommand": "/Users/you/projects/laptop-bridge/scripts/launch-job.zsh"` —
 see `scripts/launch-job.zsh` (machine-specific: Orca + repo hardcoded).
 It spawns a worktree Claude with prompt `/slack-ta [threadTs:$SLACK_THREAD_TS] $SLACK_PROMPT`:
 the token travels *inside the prompt*, since the job's Claude only sees what the
-skill receives (see "Job-side skill" below).
+skill receives (see "Job-side skills" below).
 
 Connect the worktree's Claude to the MCP (once, user scope):
 
 ```sh
-claude mcp add --transport http --scope user slack-stream http://127.0.0.1:8365/mcp
+claude mcp add --transport http --scope user laptop http://127.0.0.1:8365/mcp
 ```
 
 ## MCP tools
@@ -213,17 +215,23 @@ A job that dies without `finish` gets swept: streams idle > `staleStreamMinutes`
 Why each job gets ONE progress message (stream, then `chat.update` edits after
 ~3.5 min) and the Slack API quirks behind it: see [RECIPE.md](RECIPE.md#design-decisions--gotchas).
 
-## Job-side skill
+## Job-side skills
 
-Don't make each job improvise the streaming protocol — give your agent a skill
-(e.g. `~/.claude/skills/slack-ta/`) that owns it. The launch command passes the
-correlation token inside the prompt (`/slack-ta [threadTs:…] <task>`); the skill
-should: extract `threadTs` and pass it to every `slack-stream` MCP call, open a
-`thinking_step` immediately, update the checklist at real milestones only,
-`append_text` for the final summary, and ALWAYS `finish` — also on failure. Two
-error rules worth copying: if the token is missing, do the work but skip
-streaming; if a call errors with "no live stream", the stream was swept —
-continue the work, stop streaming.
+Don't make each job improvise the protocol: the two skills in [`skills/`](skills)
+own it. `slack-ta` streams a Slack job (`/slack-ta [threadTs:…] <task>`),
+`linear-ta` runs a Linear lane (`/linear-ta [lane:…] …`). Install them with
+
+```sh
+npx skills add ArnaudRinquin/laptop-bridge --global
+```
+
+They are mine, so adapt them: `slack-ta` hands the task to a private `/go`
+pipeline (replace that step with your own workflow), and `linear-ta` names my
+workspace and team. What is worth keeping: pass the correlation token to every
+`laptop` MCP call, report at real milestones only, and always close the request
+(`finish`, or a `response` / `error` activity), also on failure. If the token is
+missing, do the work and skip the reporting; if a call errors with "no live
+stream", the stream was swept: continue the work, stop streaming.
 
 `GET /healthz` lists active streams.
 
@@ -235,19 +243,19 @@ the measured Slack / Linear / Orca / SwiftBar gotchas live in [RECIPE.md](RECIPE
 ## SwiftBar
 
 ```sh
-cp swiftbar/slack-to-laptop.sh ~/Library/Application\ Support/SwiftBar/Plugins/  # or your plugin dir
-chmod +x .../slack-to-laptop.sh
+cp swiftbar/laptop-bridge.sh ~/Library/Application\ Support/SwiftBar/Plugins/  # or your plugin dir
+chmod +x .../laptop-bridge.sh
 ```
 
 Streamable plugin: SwiftBar owns the process lifecycle; menubar shows 🛰️ + active
 stream count. Don't also run `bun run server.ts` manually (port collision).
-Test from a terminal first: `./swiftbar/slack-to-laptop.sh` — you should see
+Test from a terminal first: `./swiftbar/laptop-bridge.sh` — you should see
 blocks starting with `~~~`. Logs: `~/.cache/slack-to-laptop/server.log`
 (written by the server itself — NEVER add a stderr redirect to the plugin
 script: closing SwiftBar's stderr pipe makes it spin at 100%+ CPU).
 
 SwiftBar does NOT respawn the process if it dies. To restart the bridge:
-`open -g "swiftbar://refreshplugin?name=slack-to-laptop"` (or SwiftBar menu →
+`open -g "swiftbar://refreshplugin?name=laptop-bridge"` (or SwiftBar menu →
 plugin → Refresh). If the 🛰️ icon is missing but the process runs, check
 `defaults read com.ameba.SwiftBar` for `"NSStatusItem VisibleCC
-slack-to-laptop.sh" = 0` and write it back to `-bool true`.
+laptop-bridge.sh" = 0` and write it back to `-bool true`.
