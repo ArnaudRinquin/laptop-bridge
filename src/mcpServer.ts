@@ -13,7 +13,14 @@ const fail = (err: unknown) => ({
   content: [{ type: "text" as const, text: err instanceof Error ? err.message : String(err) }],
 });
 
-function buildServer(ops: StreamOps, jobs: JobsIndex): McpServer {
+export interface HttpExtensions {
+  /** Routes that need the raw body (webhooks) — mounted before express.json(). */
+  mountBeforeJson?: (app: express.Express) => void;
+  /** Extra MCP tools served on the same /mcp endpoint. */
+  registerTools?: (server: McpServer) => void;
+}
+
+function buildServer(ops: StreamOps, jobs: JobsIndex, ext?: HttpExtensions): McpServer {
   const server = new McpServer({ name: "slack-stream", version: "0.1.0" });
 
   server.registerTool(
@@ -126,20 +133,28 @@ function buildServer(ops: StreamOps, jobs: JobsIndex): McpServer {
     },
   );
 
+  ext?.registerTools?.(server);
   return server;
 }
 
 const slug = (s: string) =>
   s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "step";
 
-export function startMcpHttp(port: number, ops: StreamOps, registry: Registry, jobs: JobsIndex) {
+export function startMcpHttp(
+  port: number,
+  ops: StreamOps,
+  registry: Registry,
+  jobs: JobsIndex,
+  ext?: HttpExtensions,
+) {
   const app = express();
+  ext?.mountBeforeJson?.(app);
   app.use(express.json());
 
   // Stateless transport: fresh server+transport per request, no session bookkeeping.
   // All state lives in the shared registry, keyed by threadTs.
   app.post("/mcp", async (req, res) => {
-    const server = buildServer(ops, jobs);
+    const server = buildServer(ops, jobs, ext);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => {
       void transport.close();

@@ -2,7 +2,25 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+export interface LinearConfig {
+  clientId: string;
+  clientSecret: string;
+  webhookSecret: string;
+  /** Public origin that forwards /linear to this bridge (Tailscale Funnel). */
+  publicUrl: string;
+  /** Issue status that starts work when an issue is moved into it. */
+  triggerStatus: string;
+  /** Team key → repo path, e.g. { "RBD": "/Users/me/projects/booker" }. */
+  teamRepos: Record<string, string>;
+  /** Project name → repo path; wins over the team's repo. */
+  projectRepos: Record<string, string>;
+  /** Lanes with a live session allowed at once; further starts are refused. */
+  maxLanes: number;
+}
+
 export interface Config {
+  /** Absent = Linear front door off; the Slack side is unaffected. */
+  linear?: LinearConfig;
   botToken: string;
   appToken: string;
   port: number;
@@ -44,6 +62,7 @@ export function loadConfig(): Config {
   if (!j.botToken?.startsWith("xoxb-")) throw new Error("config.botToken must be an xoxb- bot token");
   if (!j.appToken?.startsWith("xapp-")) throw new Error("config.appToken must be an xapp- app-level token");
   return {
+    linear: parseLinear(j.linear),
     botToken: j.botToken,
     appToken: j.appToken,
     port: j.port ?? 8365,
@@ -58,5 +77,22 @@ export function loadConfig(): Config {
     herdrBin: j.herdrBin ?? "/opt/homebrew/bin/herdr",
     herdrSocket: j.herdrSocket ?? join(homedir(), ".config", "herdr", "herdr.sock"),
     orcaBin: j.orcaBin ?? "/Applications/Orca.app/Contents/Resources/bin/orca",
+  };
+}
+
+function parseLinear(l: Record<string, unknown> | undefined): LinearConfig | undefined {
+  if (!l) return undefined;
+  for (const k of ["clientId", "clientSecret", "webhookSecret", "publicUrl"]) {
+    if (typeof l[k] !== "string" || !l[k]) throw new Error(`config.linear.${k} is required when config.linear is set`);
+  }
+  return {
+    clientId: l.clientId as string,
+    clientSecret: l.clientSecret as string,
+    webhookSecret: l.webhookSecret as string,
+    publicUrl: (l.publicUrl as string).replace(/\/$/, ""),
+    triggerStatus: typeof l.triggerStatus === "string" ? l.triggerStatus : "Waiting for agent",
+    teamRepos: (l.teamRepos as Record<string, string>) ?? {},
+    projectRepos: (l.projectRepos as Record<string, string>) ?? {},
+    maxLanes: typeof l.maxLanes === "number" ? l.maxLanes : 3,
   };
 }
