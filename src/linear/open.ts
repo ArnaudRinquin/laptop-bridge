@@ -20,7 +20,13 @@ export function mountOpen(app: express.Express, config: Config, lanes: LaneIndex
     try {
       await exec(config.orcaBin, ["worktree", "activate", "--worktree", `path:${lane.cwd}`, "--json"], { timeout: 30_000 });
       await exec("/usr/bin/open", ["-a", "Orca"]).catch(() => {});
-      res.send(page(`Opened <b>${lane.name.replace(/[<&]/g, "")}</b> in Orca. You can close this tab.`));
+      // A tab opened by the link has a single history entry, which browsers let a
+      // script close (Firefox excepted) — the text is what is left if it can't.
+      res.send(
+        page(
+          `Opened <b>${lane.name.replace(/[<&]/g, "")}</b> in Orca. You can close this tab.<script>window.close()</script>`,
+        ),
+      );
     } catch (err) {
       log(`linear: open failed for ${lane.key}: ${err}`);
       res.status(500).send(page("Orca couldn't open that worktree — it may have been removed."));
