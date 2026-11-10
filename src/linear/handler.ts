@@ -234,10 +234,12 @@ export function createLinearHandler(deps: HandlerDeps): LinearHandler {
     }
   }
 
-  async function onIssueUpdate(event: Record<string, unknown>) {
+  async function onIssueChange(event: Record<string, unknown>) {
     const data = event.data as { id: string; identifier?: string; state?: { name?: string } };
     const from = event.updatedFrom as { stateId?: string } | undefined;
-    if (!from?.stateId || data.state?.name !== linear.triggerStatus) return;
+    // Entering the status: moved into it, or created straight in it.
+    const entered = event.action === "create" || Boolean(from?.stateId);
+    if (!entered || data.state?.name !== linear.triggerStatus) return;
     const created = await client.graphql<{ agentSessionCreateOnIssue: { agentSession: { id: string } } }>(
       `mutation ($input: AgentSessionCreateOnIssue!) { agentSessionCreateOnIssue(input: $input) { agentSession { id } } }`,
       { input: { issueId: data.id } },
@@ -247,10 +249,11 @@ export function createLinearHandler(deps: HandlerDeps): LinearHandler {
     await routeSession(sessionId, data.id, `Handle ${data.identifier ?? "this issue"} (moved to "${linear.triggerStatus}").`);
   }
 
-  async function onProjectUpdate(event: Record<string, unknown>) {
+  async function onProjectChange(event: Record<string, unknown>) {
     const data = event.data as { id: string; name: string; slugId: string; teamIds?: string[]; status?: { type?: string } };
     const from = event.updatedFrom as { statusId?: string } | undefined;
-    if (!from?.statusId || data.status?.type !== "started") return;
+    const entered = event.action === "create" || Boolean(from?.statusId);
+    if (!entered || data.status?.type !== "started") return;
     const key = `p-${data.slugId}`;
     const existing = lanes.get(key);
     if (existing && (booting(existing) || (await livePane(existing)))) return;
@@ -284,8 +287,8 @@ export function createLinearHandler(deps: HandlerDeps): LinearHandler {
     if (eventType !== "AgentSessionEvent" && actor?.type !== "user") return;
 
     if (eventType === "AgentSessionEvent") await serial(() => onAgentSession(event));
-    else if (eventType === "Issue" && event.action === "update") await serial(() => onIssueUpdate(event));
-    else if (eventType === "Project" && event.action === "update") await serial(() => onProjectUpdate(event));
+    else if (eventType === "Issue" && event.action !== "remove") await serial(() => onIssueChange(event));
+    else if (eventType === "Project" && event.action !== "remove") await serial(() => onProjectChange(event));
   };
   return { handle, flushPending: (key) => serial(() => flushPending(key)) };
 }

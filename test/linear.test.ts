@@ -258,3 +258,19 @@ test("a lane that never registers reports the failure and delivers held messages
   await h.session("prompted", "s1", "i1", "now");
   expect(h.calls.injected).toEqual(["[linear follow-up session:s1] held", "[linear follow-up session:s1] now"]);
 });
+
+test("an issue or project created straight in its trigger status starts work", async () => {
+  const h = harness({ i1: { identifier: "RBD-8", title: "Queued" } });
+  await h.handle({ action: "create", actor: { type: "user" }, data: { id: "i1", identifier: "RBD-8", state: { name: "Todo" } } }, "Issue");
+  expect(h.calls.launches).toHaveLength(0);
+  await h.handle({ action: "create", actor: { type: "user" }, data: { id: "i1", identifier: "RBD-8", state: { name: "Waiting for agent" } } }, "Issue");
+  await h.handle(
+    { action: "create", actor: { type: "user" }, url: "u", data: { id: "p1", name: "New", slugId: "nnn", teamIds: ["team-rbd"], status: { type: "started" } } },
+    "Project",
+  );
+  await h.handle(
+    { action: "create", actor: { type: "user" }, url: "u", data: { id: "p2", name: "Later", slugId: "lll", teamIds: ["team-rbd"], status: { type: "backlog" } } },
+    "Project",
+  );
+  expect(h.calls.launches.map((l) => l.prompt.split(" ").slice(0, 2).join(" "))).toEqual(["/linear-ta [lane:RBD-8]", "/linear-ta [lane:p-nnn]"]);
+});
