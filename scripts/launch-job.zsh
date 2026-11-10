@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Launched by slack-to-laptop per @mention with SLACK_THREAD_TS / SLACK_CHANNEL /
+# Launched by laptop-bridge per @mention with SLACK_THREAD_TS / SLACK_CHANNEL /
 # SLACK_PROMPT / SLACK_EVENT_TS / SLACK_MCP_URL in env.
 #
 # Creates an Orca worktree with claude in its first terminal. The monorepo's

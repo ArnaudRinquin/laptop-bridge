@@ -11,4 +11,4 @@
 # streamable blocks; the server writes its own log file (src/log.ts).
 # DO NOT redirect stderr here: SwiftBar monitors the stderr pipe, and closing it
 # via `2>>file` makes SwiftBar spin at 100%+ CPU on EOF forever.
-exec /Users/arnaud/.bun/bin/bun run /Users/arnaud/projects/slack-to-laptop/server.ts --swiftbar
+exec /Users/arnaud/.bun/bin/bun run /Users/arnaud/projects/laptop-bridge/server.ts --swiftbar
