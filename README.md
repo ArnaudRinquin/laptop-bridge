@@ -1,14 +1,22 @@
 # slack-to-laptop
 
-One long-lived local process, three hats: Slack `@mention` listener (Socket Mode),
-remote HTTP MCP server that Claude Code worktree jobs call to drive the native
-Slack stream, and SwiftBar menubar status.
+One long-lived local process that turns a message into work on this laptop, and
+reports back where the message came from. Two front doors, one back room:
 
-`threadTs` is the correlation key: the worktree job only ever knows `threadTs`;
-this process maps it to the real Slack stream id. The map is snapshotted to
-`~/.cache/slack-to-laptop/registry.json`, so restarting the bridge (deploys,
-crashes) doesn't interrupt running jobs: on boot, restored streams are
-force-rotated by the first keepalive tick — rotation doubles as recovery.
+- **Slack**: `@mention` the bot (Socket Mode) → a worktree job, streamed back
+  into the thread.
+- **Linear**: delegate an issue to the agent, `@mention` it, move an issue to a
+  trigger status, or start a project → a lane (worktree + Claude session) that
+  answers in Linear's agent sessions and keeps the project's issues up to date.
+- **Back room**: a local HTTP MCP server the jobs call to report progress, a
+  registry that routes follow-ups into the running Claude session, and a
+  SwiftBar menubar status.
+
+The job never holds Slack or Linear credentials. It only knows a correlation
+token passed in its prompt (`threadTs` for Slack, a lane key and session id for
+Linear); this process maps it to the real thread and owns the tokens. State is
+snapshotted under `~/.cache/slack-to-laptop/`, so restarting the bridge doesn't
+interrupt running jobs.
 
 ## Slack app (one-time)
 
@@ -51,7 +59,7 @@ Set `jobCommand` in the config — a zsh command run per mention with env:
 | `SLACK_MCP_URL` | `http://127.0.0.1:8365/mcp` |
 
 Example: `"jobCommand": "/Users/you/projects/slack-to-laptop/scripts/launch-job.zsh"` —
-see `scripts/launch-job.zsh` (machine-specific: herdr + repo hardcoded).
+see `scripts/launch-job.zsh` (machine-specific: Orca + repo hardcoded).
 It spawns a worktree Claude with prompt `/slack-ta [threadTs:$SLACK_THREAD_TS] $SLACK_PROMPT`:
 the token travels *inside the prompt*, since the job's Claude only sees what the
 skill receives (see "Job-side skill" below).
@@ -66,7 +74,7 @@ claude mcp add --transport http --scope user slack-stream http://127.0.0.1:8365/
 
 All take `threadTs` (from `SLACK_THREAD_TS`):
 
-- `register_job({threadTs, cwd, paneId?, pid?, branch?})` — call once at boot; where the session lives, for follow-up routing (`paneId` = `$HERDR_PANE_ID`, or `$TMUX_PANE` on the tmux fallback)
+- `register_job({threadTs, cwd, paneId?, pid?, branch?})` — call once at boot; where the session lives, for follow-up routing (`paneId` = `$ORCA_TERMINAL_HANDLE`, or `$TMUX_PANE` on the tmux fallback)
 - `thinking_step({threadTs, title, status, id?, details?})` — checklist step; `status ∈ pending|in_progress|complete|error`; same `id`/title updates the step
 - `append_text({threadTs, markdown})` — prose in the progress message (important mid-course findings only)
 - `set_status({threadTs, text})` — grey "is …" line; `""` clears
@@ -76,45 +84,109 @@ All take `threadTs` (from `SLACK_THREAD_TS`):
 
 Mentioning the bot again in a job's thread does NOT spawn a second job: the
 bridge looks the thread up in `~/.cache/slack-to-laptop/jobs.json` (written by
-`register_job`, survives `finish` for 7 days), verifies the session's pane
-still sits in the job's worktree (a pane id alone is not a handle — tmux
-recycles them, herdr re-issues them on `pane move` — so cwd is ground truth),
-and types `[slack follow-up threadTs:…] <text>` into that Claude session —
-mid-work it's a steering message, after finish a new turn with full context. A
-stream is reopened first if needed ("Reconnecting to session…"). If the pane is
-gone, it falls back to spawning a fresh job with a note. Only the typing is
-multiplexer-specific (`src/inject.ts`); finding the session is
+`register_job`, survives `finish` for 7 days), verifies the session's terminal
+still sits in the job's worktree (a terminal id alone is not a handle — tmux
+recycles pane ids, Orca's handles go stale on an app restart — so cwd is ground
+truth), and types `[slack follow-up threadTs:…] <text>` into that Claude
+session — mid-work it's a steering message, after finish a new turn with full
+context. A stream is reopened first if needed ("Reconnecting to session…"). If
+the terminal is gone, it falls back to spawning a fresh job with a note. Only
+the typing is terminal-specific (`src/inject.ts`); finding the session is
 registration-based and generic.
 
-## Multiplexers (herdr + tmux)
+## Terminals (Orca + tmux)
 
-Jobs run under [herdr](https://herdr.dev); tmux is still read for follow-up
-routing, so sessions started before the migration stay reachable.
-
-- **Launching** (`scripts/launch-job.zsh`) is herdr-only. It sets `HERDR_ENV=1`
-  and runs `wt spawn` directly — no throwaway window. The tmux version needed
-  one because the monorepo's `setup-tmux` hook exits silently without `$TMUX`;
-  herdr's layout drives the herdr server over its socket, so nothing has to run
-  inside a pane. If no server is up (fresh boot) it starts one headless, the
-  counterpart of `tmux new-session -d`.
-- **Follow-ups** (`src/inject.ts`) list *both* multiplexers and merge the
-  panes; a dead one can't hide the other's. Each pane carries its `mux`, and
-  the injection dispatches on it: `herdr pane send-text` + an `enter` key, or
-  `tmux send-keys -l` + `Enter`.
-- herdr labels the recognised agent outright (`"agent": "claude"`), so no
-  command-name guessing is needed on that side; the tmux heuristic (the claude
-  CLI shows up as its version number) still covers tmux panes.
+Jobs run as Orca worktrees: `orca worktree create` gives
+each job its own checkout with Claude in the first terminal, and
+`orca terminal send` types follow-ups into it. tmux panes are still listed, so
+sessions started before the move stay reachable; no tmux server just means no
+tmux panes.
 
 Two gotchas, both measured:
 
-- **`herdr agent prompt` does not deliver here** — the text never reaches
-  Claude's input box and, without `--wait`, it reports success anyway.
-  `pane send-text` does deliver. (Same finding as the monorepo's
-  `herdr-layout.local`, which passes the prompt as claude's own CLI argument.)
-- **The herdr CLI resolves its socket from `$HOME`**, which the SwiftBar-launched
-  bridge can't be assumed to have — so `herdrSocket` is passed explicitly as
-  `HERDR_SOCKET_PATH` on every call. `herdr status server` always exits 0; its
-  state is in the output, not the code.
+- **Use the CLI inside the app bundle**
+  (`/Applications/Orca.app/Contents/Resources/bin/orca`). The
+  `/usr/local/bin/orca` symlink is root-owned mode 0700 and the CLI can't
+  resolve Orca.app through it.
+- **A repo with `setupAgentStartupPolicy: wait-for-setup` drops `--prompt`**
+  (`launch.prompt.outcome` is `"not-delivered"`): Claude starts on an empty
+  input once setup ends. The Linear launcher (`src/linear/launch.ts`) waits for
+  the prompt line and types the prompt itself, once.
+
+## Linear
+
+Optional: everything below is off unless the config has a `linear` block.
+
+**The model.** A Linear *project* is a lane: one worktree, one Claude session,
+and every issue of that project is routed to it — issues are the lane's own
+tracking, not separate jobs. An issue *without* a project gets its own lane.
+
+**What starts work**
+
+| In Linear | In the bridge |
+|---|---|
+| Delegate an issue to the agent, or `@mention` it | New agent session → the issue's lane (created if needed) |
+| Reply in an agent session | Typed into the lane's terminal as `[linear follow-up session:…]` |
+| Move an issue into the trigger status (`triggerStatus`) | The bridge opens an agent session on the issue, then as above |
+| Move a project to a started status | The project's lane is launched with the project as its brief |
+
+Messages that arrive while a lane is still booting are held and typed in when
+it registers. Only a human's change triggers work: the lane writes to Linear
+as the app, and events whose actor is not a user are ignored. At most
+`maxLanes` lanes with a live session run at once.
+
+**Setup (one-time)**
+
+1. Linear webhooks are plain HTTPS POSTs, so the laptop needs a public URL.
+   Tailscale Funnel, exposing that one path only:
+   `tailscale funnel --bg --set-path /linear http://127.0.0.1:8365/linear`
+2. Linear → Settings → API → OAuth applications → New. Callback URL
+   `<publicUrl>/linear/oauth/callback`, webhook URL `<publicUrl>/linear/webhook`.
+   Events: **Agent session events**, **Inbox notifications**, **Permission
+   changes**, plus **Issues** and **Projects** for the status triggers.
+3. Add to the config:
+
+   ```json
+   "linear": {
+     "clientId": "…", "clientSecret": "…", "webhookSecret": "…",
+     "publicUrl": "https://<machine>.<tailnet>.ts.net",
+     "triggerStatus": "Waiting for agent",
+     "teamRepos": { "RBD": "/Users/you/projects/booker" },
+     "projectRepos": { "Website": "/Users/you/projects/site" },
+     "maxLanes": 3
+   }
+   ```
+
+   `projectRepos` (by project name) wins over `teamRepos` (by team key); an
+   issue with no mapping is refused with a message in its session.
+4. Start the bridge, open `http://127.0.0.1:8365/install/linear` on the laptop
+   and authorize the app for the teams it should see. The token (24h, refreshed
+   automatically) is stored in `~/.config/slack-trigger/linear-token.json`.
+5. Add the trigger status to each team's workflow by hand: an agent app is not
+   allowed to edit workflows.
+
+**Security.** Only `/linear/*` is reachable from outside. The webhook checks
+the `Linear-Signature` HMAC over the raw body, rejects timestamps older than a
+minute and drops redelivered ids; the OAuth callback only accepts a `state`
+this process issued. `/mcp`, `/install/linear` and `/open/*` are localhost only.
+
+**MCP tools for the lane** (same `/mcp` endpoint)
+
+- `linear_register({lane, cwd, paneId?, branch?})` — call once at boot: routes
+  follow-ups to this session, flushes held messages, attaches the "Open in
+  Orca" link to the lane's sessions and project.
+- `linear_activity({session, type, body | action…})` — post on an agent session:
+  `thought`, `action`, `elicitation` (ask the user and wait), `response`, `error`.
+- `linear_plan({session, items})` — the session's checklist (full list each time).
+- `linear_graphql({query, variables?})` — anything else, as the app: read the
+  project, create and move issues, post project updates.
+
+**Open in Orca.** `GET /open/<lane>` runs `orca worktree activate` on the lane's
+worktree. The link is attached in Linear as `http://127.0.0.1:8365/open/<lane>`,
+so it only does something on the laptop itself.
+
+The job-side skill is `linear-ta` (the Linear twin of `slack-ta`, see below).
+Raw events are appended to `~/.cache/slack-to-laptop/linear-events.jsonl`.
 
 Future idea (deliberately not built): worktree cleanup on job end conflicts
 with follow-ups — the kept-alive session is what makes them possible. Cleanest
@@ -180,7 +252,7 @@ in an afternoon — here's the TL;DR to hand your agent (or read yourself).
 **The one design trick**: the job never holds Slack credentials or message
 ids. It only knows `threadTs` — a correlation token passed inside its prompt —
 and the bridge maps it to the real channel/message and owns the token. Any
-runner (herdr, tmux, container, CI, SSH) works as long as the token rides along and
+runner (Orca, tmux, container, CI, SSH) works as long as the token rides along and
 the runner can reach `127.0.0.1:8365`.
 
 **The Slack rendering strategy** (the hard-won part — all measured, none
@@ -200,8 +272,17 @@ documented; see the section above for detail):
 to disk — that's what makes bridge restarts invisible to running jobs (replay
 log re-renders the whole message). A second file maps `threadTs → session
 location` so re-mentions in a thread route INTO the running session (here:
-`herdr pane send-text` or `tmux send-keys`, cwd-verified) instead of spawning a
+`orca terminal send` or `tmux send-keys`, cwd-verified) instead of spawning a
 duplicate.
+
+**A second front door** (here: Linear) reuses all of that and adds only its own
+edge: a verified webhook instead of a socket, its own correlation token, and
+its own report-back tools on the same MCP server. Two things differ from Slack
+and are worth copying. Webhooks need a public URL, so expose one path through a
+tunnel and treat everything under it as hostile until the signature checks out.
+And decide what a *unit of work* is before wiring triggers: here a project is
+one long-lived session and its issues are messages to it, which is why a second
+issue types into a running terminal instead of opening a second worktree.
 
 **Reliability floor**: dedupe redelivered Slack events (3s ack window); a
 stale sweep for jobs that die without `finish`; every Slack write has a
