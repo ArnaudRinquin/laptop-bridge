@@ -55,6 +55,7 @@ const lanes = new LaneIndex(join(homedir(), ".cache", "slack-to-laptop", "linear
 const linearHandler =
   linear && linearClient && createLinearHandler({ config, linear, client: linearClient, lanes, launch: orcaLauncher(config) });
 const httpServer = startMcpHttp(config.port, ops, registry, jobs, {
+  publicPrefix: linear ? "/linear" : undefined,
   mountBeforeJson: (app) => {
     if (!linear || !linearClient || !linearHandler) return;
     mountLinear(app, linear, linearClient, linearHandler.handle);

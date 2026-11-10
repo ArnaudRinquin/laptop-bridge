@@ -39,7 +39,8 @@ export function registerLinearTools(
       try {
         const record = lanes.get(lane);
         if (!record) throw new Error(`unknown lane ${lane}`);
-        lanes.set({ ...record, cwd, paneId: paneId ?? record.paneId, branch: branch ?? record.branch, registeredAt: Date.now() });
+        // The launcher's worktree path and terminal win: a caller can confirm a lane is up, not move it elsewhere.
+        lanes.set({ ...record, cwd: record.cwd ?? cwd, paneId: record.paneId ?? paneId, branch: branch ?? record.branch, registeredAt: Date.now() });
         // After this tool returns, so the held messages land once Claude is back at its prompt.
         setTimeout(() => void onRegistered(lane).catch(() => {}), 3000).unref();
         // Sessions get their link when they join the lane (handler); the project gets it once, here.

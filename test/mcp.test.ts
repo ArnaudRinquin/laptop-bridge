@@ -305,3 +305,9 @@ test("healthz lists active streams", async () => {
   await ops.kill(registry.get("333.444")!, "bye");
   expect(registry.has("333.444")).toBe(false);
 });
+
+test("requests not addressed to this machine by a local name are refused (DNS rebinding)", async () => {
+  const res = await fetch(`http://127.0.0.1:${PORT}/healthz`, { headers: { host: "evil.example" } });
+  expect(res.status).toBe(403);
+  expect((await fetch(`http://127.0.0.1:${PORT}/healthz`)).status).toBe(200);
+});

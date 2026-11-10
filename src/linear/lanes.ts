@@ -73,7 +73,8 @@ export class LaneIndex {
     try {
       mkdirSync(dirname(this.persistPath), { recursive: true });
       const tmp = `${this.persistPath}.tmp`;
-      writeFileSync(tmp, JSON.stringify(this.values(), null, 1));
+      // Holds held message text: owner-only, like the token file.
+      writeFileSync(tmp, JSON.stringify(this.values(), null, 1), { mode: 0o600 });
       renameSync(tmp, this.persistPath);
     } catch (err) {
       log(`linear: lane index persist failed: ${err}`);

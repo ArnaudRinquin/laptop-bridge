@@ -16,6 +16,8 @@ const fail = (err: unknown) => ({
 export interface HttpExtensions {
   /** Routes that need the raw body (webhooks) — mounted before express.json(). */
   mountBeforeJson?: (app: express.Express) => void;
+  /** Path prefix reachable from outside (through a tunnel); exempt from the local-Host check. */
+  publicPrefix?: string;
   /** Extra MCP tools served on the same /mcp endpoint. */
   registerTools?: (server: McpServer) => void;
 }
@@ -148,6 +150,16 @@ export function startMcpHttp(
   ext?: HttpExtensions,
 ) {
   const app = express();
+  // The MCP endpoint is unauthenticated and local. A web page can reach
+  // 127.0.0.1 through DNS rebinding, but only with its own hostname in Host:
+  // anything not addressed to this machine by a local name is refused. Paths
+  // a tunnel forwards on purpose (ext.publicPrefix) authenticate themselves.
+  const localHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`]);
+  app.use((req, res, next) => {
+    if (ext?.publicPrefix && (req.path === ext.publicPrefix || req.path.startsWith(`${ext.publicPrefix}/`))) return next();
+    if (localHosts.has((req.headers.host ?? "").toLowerCase())) return next();
+    res.status(403).json({ error: "forbidden host" });
+  });
   ext?.mountBeforeJson?.(app);
   app.use(express.json());
 

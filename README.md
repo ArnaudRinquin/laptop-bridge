@@ -153,9 +153,12 @@ as the app, and events whose actor is not a user are ignored. At most
      "triggerStatus": "Waiting for agent",
      "teamRepos": { "RBD": "/Users/you/projects/booker" },
      "projectRepos": { "Website": "/Users/you/projects/site" },
-     "maxLanes": 3
+     "maxLanes": 3,
+     "allowedUserIds": ["<your Linear user id>"]
    }
    ```
+
+   `allowedUserIds` empty = any member of the workspace can start work.
 
    `projectRepos` (by project name) wins over `teamRepos` (by team key); an
    issue with no mapping is refused with a message in its session.
@@ -168,7 +171,12 @@ as the app, and events whose actor is not a user are ignored. At most
 **Security.** Only `/linear/*` is reachable from outside. The webhook checks
 the `Linear-Signature` HMAC over the raw body, rejects timestamps older than a
 minute and drops redelivered ids; the OAuth callback only accepts a `state`
-this process issued. `/mcp`, `/install/linear` and `/open/*` are localhost only.
+this process issued. `/mcp`, `/install/linear` and `/open/*` are localhost only,
+and refuse any request whose `Host` is not a local name (a web page reaching
+127.0.0.1 through DNS rebinding carries its own). Events signed for another
+workspace than the installed one are ignored. Text coming from Linear is typed
+only into a terminal Orca reports as running Claude, on one line, with control
+bytes removed and look-alike bridge tags defused.
 
 **MCP tools for the lane** (same `/mcp` endpoint)
 

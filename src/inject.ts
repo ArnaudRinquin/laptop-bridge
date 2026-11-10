@@ -14,6 +14,8 @@ export interface Pane {
   /** cwd of the pane's foreground process — diverges from `path` while a command runs. */
   foregroundPath?: string;
   command: string;
+  /** Agent the multiplexer recognises as running there ("claude"); unset for a plain shell. */
+  agent?: string;
   mux: Mux;
 }
 
@@ -82,13 +84,20 @@ interface OrcaTerminal {
   title?: string;
 }
 
-async function listOrcaPanes(config: Config): Promise<Pane[]> {
-  const { stdout } = await exec(config.orcaBin, ["terminal", "list", "--json"]);
-  const parsed = JSON.parse(stdout) as { ok?: boolean; result?: { terminals?: OrcaTerminal[] } };
-  return (parsed.result?.terminals ?? []).map((t) => ({
+/**
+ * Throws when Orca can't answer or the list is cut short: callers that decide
+ * "this session is gone" from the list must not mistake a busy Orca for it.
+ */
+export async function listOrcaPanes(config: Config): Promise<Pane[]> {
+  const { stdout } = await exec(config.orcaBin, ["terminal", "list", "--json"], { timeout: 20_000, maxBuffer: 16 * 1024 * 1024 });
+  const parsed = JSON.parse(stdout) as { ok?: boolean; result?: { terminals?: OrcaTerminal[]; truncated?: boolean } };
+  if (!parsed.ok || !parsed.result?.terminals) throw new Error("orca terminal list returned no terminals field");
+  if (parsed.result.truncated) throw new Error("orca terminal list was truncated");
+  return parsed.result.terminals.map((t) => ({
     id: t.handle ?? "",
     path: t.worktreePath ?? "",
     command: t.agentIdentity ?? t.title ?? "",
+    agent: t.agentIdentity ?? undefined,
     mux: "orca" as const,
   }));
 }
@@ -100,7 +109,7 @@ async function listOrcaPanes(config: Config): Promise<Pane[]> {
 export async function injectText(config: Config, pane: Pane, text: string) {
   const oneLine = text.replace(/\s*\n+\s*/g, " ").trim();
   if (pane.mux === "orca") {
-    await exec(config.orcaBin, ["terminal", "send", "--terminal", pane.id, "--text", oneLine, "--enter", "--json"]);
+    await exec(config.orcaBin, ["terminal", "send", "--terminal", pane.id, "--text", oneLine, "--enter", "--json"], { timeout: 30_000 });
   } else {
     await exec(config.tmuxBin, ["send-keys", "-t", pane.id, "-l", "--", oneLine]);
     await exec(config.tmuxBin, ["send-keys", "-t", pane.id, "Enter"]);

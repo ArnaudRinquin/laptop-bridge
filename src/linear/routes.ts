@@ -1,5 +1,5 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { appendFileSync, renameSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import express from "express";
@@ -65,7 +65,7 @@ export function mountLinear(
       return;
     }
     if (typeof req.query.code !== "string") {
-      res.status(400).send(`Linear returned no code: ${String(req.query.error ?? "unknown error")}`);
+      res.status(400).type("text/plain").send(`Linear returned no code: ${String(req.query.error ?? "unknown error")}`);
       return;
     }
     try {
@@ -101,16 +101,20 @@ export function mountLinear(
     // Linear wants a 200 within 5s; the work happens after the ack.
     res.sendStatus(200);
 
+    // Keyed on the signed bytes, not on the (unsigned) delivery header.
     const delivery = req.get("linear-delivery") ?? "";
-    if (delivery && seenDeliveries.has(delivery)) {
-      log(`linear: dropping redelivered ${delivery}`);
+    const digest = createHash("sha256").update(raw).digest("hex");
+    if (seenDeliveries.has(digest)) {
+      log(`linear: dropping redelivered ${delivery || digest.slice(0, 12)}`);
       return;
     }
-    if (delivery) seenDeliveries.set(delivery, Date.now());
+    seenDeliveries.set(digest, Date.now());
 
     const eventType = req.get("linear-event") ?? String(event.type ?? "?");
     log(`linear: event ${eventType}/${String(event.action ?? "?")} delivery=${delivery}`);
     try {
+      // Full payloads: keep one previous file, not an ever-growing one.
+      if ((statSync(capturePath, { throwIfNoEntry: false })?.size ?? 0) > 5 * 1024 * 1024) renameSync(capturePath, `${capturePath}.1`);
       appendFileSync(capturePath, `${JSON.stringify({ receivedAt: Date.now(), eventType, delivery, event })}\n`, {
         mode: 0o600,
       });

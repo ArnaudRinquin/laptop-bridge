@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { log } from "./log";
 
 export interface LinearConfig {
   clientId: string;
@@ -16,6 +17,8 @@ export interface LinearConfig {
   projectRepos: Record<string, string>;
   /** Lanes with a live session allowed at once; further starts are refused. */
   maxLanes: number;
+  /** Linear user ids allowed to start work. Empty = any member of the workspace. */
+  allowedUserIds: string[];
 }
 
 export interface Config {
@@ -77,7 +80,11 @@ export function loadConfig(): Config {
 function parseLinear(l: Record<string, unknown> | undefined): LinearConfig | undefined {
   if (!l) return undefined;
   for (const k of ["clientId", "clientSecret", "webhookSecret", "publicUrl"]) {
-    if (typeof l[k] !== "string" || !l[k]) throw new Error(`config.linear.${k} is required when config.linear is set`);
+    if (typeof l[k] !== "string" || !l[k]) {
+      // Not fatal: a half-filled Linear block must not take the Slack side down with it.
+      log(`config.linear.${k} is missing — Linear front door disabled`);
+      return undefined;
+    }
   }
   return {
     clientId: l.clientId as string,
@@ -88,5 +95,6 @@ function parseLinear(l: Record<string, unknown> | undefined): LinearConfig | und
     teamRepos: (l.teamRepos as Record<string, string>) ?? {},
     projectRepos: (l.projectRepos as Record<string, string>) ?? {},
     maxLanes: typeof l.maxLanes === "number" ? l.maxLanes : 3,
+    allowedUserIds: Array.isArray(l.allowedUserIds) ? l.allowedUserIds.filter((x: unknown): x is string => typeof x === "string") : [],
   };
 }

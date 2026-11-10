@@ -44,7 +44,12 @@ export function orcaLauncher(config: Config): Launcher {
     try {
       out = await create(repo, branch, prompt);
     } catch (err) {
-      log(`linear: first worktree create failed, opening Orca and retrying: ${err}`);
+      // Retry only when Orca was not there to answer. A timeout or a garbled
+      // reply may hide a worktree that WAS created; a second create would
+      // leave an orphan Claude holding the same prompt.
+      const e = err as { killed?: boolean; signal?: string | null; stdout?: string };
+      if (e.killed || e.signal || err instanceof SyntaxError || e.stdout?.trim()) throw err;
+      log(`linear: worktree create failed before Orca answered, opening Orca and retrying: ${err}`);
       await orca(["open", "--json"]);
       out = await create(repo, branch, prompt);
     }
@@ -69,6 +74,11 @@ async function deliverWhenReady(
   const deadline = Date.now() + 20 * 60_000;
   while (Date.now() < deadline) {
     await sleep(5000);
+    // Both must hold: Orca sees Claude in that terminal (not the setup shell,
+    // whose prompt may use the same glyph) and Claude shows its input line.
+    const list = await orca(["terminal", "list", "--json"], 30_000).catch(() => ({ stdout: "{}" }));
+    const terminals = (JSON.parse(list.stdout || "{}") as { result?: { terminals?: { handle?: string; agentIdentity?: string }[] } }).result?.terminals;
+    if (terminals?.find((t) => t.handle === paneId)?.agentIdentity !== "claude") continue;
     const { stdout } = await orca(["terminal", "read", "--terminal", paneId, "--json"], 30_000).catch(() => ({ stdout: "" }));
     if (!stdout.includes("❯")) continue;
     const sent = await orca(
